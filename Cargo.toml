@@ -1,0 +1,3 @@
+[workspace]
+members = ["nimu", "r4300i-rs"]
+resolver = "2" 

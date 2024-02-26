@@ -10,7 +10,7 @@ use num_traits::ops::bytes::{FromBytes, ToBytes};
 
 mod interfaces;
 pub mod registers;
-mod tlb;
+pub mod tlb;
 mod virage;
 
 use interfaces::ai::Ai;
@@ -245,6 +245,9 @@ impl State {
         T: Cop0Register,
     {
         self.registers[reg as usize] = val.as_reg(reg).expect("illegal register write");
+        if !matches!(reg, Register::Random | Register::Count) {
+            println!("cop0 reg {reg:?} write: {val:?}");
+        }
     }
 
     pub fn get_coc(&self) -> bool {
@@ -379,6 +382,10 @@ impl Cop0 {
 
     pub fn get_mi_mapping(&self) -> bool {
         self.mi.get_sec_mode_map()
+    }
+
+    pub fn vi_frame(&mut self) -> bool {
+        self.vi.frame(Box::as_ref(&self.ram))
     }
 
     fn virt_to_phys(&mut self, address: word, write: bool) -> TLBResult<word> {

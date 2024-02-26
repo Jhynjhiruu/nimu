@@ -23,6 +23,7 @@ impl Nimu {
 
     pub fn run(&mut self) {
         self.cpu.start();
+        //self.cpu.start_logging();
         while !self.cpu.halted {
             self.cpu.step();
             if self.cpu.get_pc() as u32 == 0x9fc00000 && !self.cpu.get_mi_mapping() {
@@ -33,7 +34,10 @@ impl Nimu {
                 self.cpu.start_logging();
             }*/
             if self.cpu.get_pc() as u32 == 0x9fc032cc {
-                println!("rsa -> {:08X}", self.cpu.get_reg(31) as u32);
+                println!(
+                    "rsa_verify_signature -> {:08X}",
+                    self.cpu.get_reg(31) as u32
+                );
                 self.cpu.stop_logging();
             }
             /*if self.cpu.get_pc() as u32 == 0x9fc03890 {
@@ -111,6 +115,27 @@ impl Nimu {
             if self.cpu.get_pc() as u32 == 0x9fc03fe8 {
                 //self.cpu.start_logging();
                 println!("virage write {:016X}", self.cpu.get_reg(4));
+            }
+            if self.cpu.get_pc() as u32 == 0x8000c76c {
+                self.cpu.start_logging()
+            }
+            if self.cpu.get_pc() as u32 == 0x8000F654 {
+                /*println!(
+                    "sw <{:08X}>, 16({:08X})",
+                    self.cpu.get_reg(0x10) as u32,
+                    self.cpu.get_reg(0x1D) as u32
+                );*/
+            }
+            if self.cpu.get_pc() as u32 == 0x800074FC {
+                let k0 = self.cpu.get_reg(26) as u32;
+
+                let mut dump = [0; 0x100];
+
+                for (index, i) in dump.iter_mut().enumerate() {
+                    *i = self.cpu.read::<u8>(k0 + index as u32).unwrap_or(0xEE);
+                }
+
+                write(format!("dump-{k0:08X}.bin"), dump).unwrap();
             }
         }
         self.cpu.stop();

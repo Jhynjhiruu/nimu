@@ -3,14 +3,7 @@ use crate::types::*;
 use modular_bitfield::prelude::*;
 use soft_aes::aes::aes_dec_cbc;
 
-#[bitfield]
-#[repr(u32)]
-#[derive(Debug, Clone, Copy)]
-pub struct DramAddr {
-    addr: B24,
-    #[skip]
-    __: B8,
-}
+use super::DramAddr;
 
 #[bitfield]
 #[repr(u32)]
@@ -37,6 +30,42 @@ pub struct Status {
     error: bool,
     #[skip]
     __: B29,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub struct Latency {
+    latency: byte,
+    #[skip]
+    __: B24,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub struct PulseWidth {
+    width: byte,
+    #[skip]
+    __: B24,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub struct PageSize {
+    width: B4,
+    #[skip]
+    __: B28,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub struct Release {
+    width: B2,
+    #[skip]
+    __: B30,
 }
 
 #[bitfield]
@@ -139,6 +168,16 @@ pub struct Pi {
     io_busy: bool,
     error: bool,
 
+    dom1_latency: Latency,
+    dom1_pulse_width: PulseWidth,
+    dom1_page_size: PageSize,
+    dom1_release: Release,
+
+    dom2_latency: Latency,
+    dom2_pulse_width: PulseWidth,
+    dom2_page_size: PageSize,
+    dom2_release: Release,
+
     flash_ctrl: FlashCtrl,
     flash_double_error: bool,
     flash_single_error: bool,
@@ -192,6 +231,16 @@ impl Pi {
             dma_busy: false,
             io_busy: false,
             error: false,
+
+            dom1_latency: Latency::new(),
+            dom1_pulse_width: PulseWidth::new(),
+            dom1_page_size: PageSize::new(),
+            dom1_release: Release::new(),
+
+            dom2_latency: Latency::new(),
+            dom2_pulse_width: PulseWidth::new(),
+            dom2_page_size: PageSize::new(),
+            dom2_release: Release::new(),
 
             flash_ctrl: FlashCtrl::new(),
             flash_double_error: false,
@@ -329,6 +378,22 @@ impl Pi {
                 address,
             ),
 
+            0x04600014..=0x04600017 => retrieve_byte(self.dom1_latency.into(), address),
+
+            0x04600018..=0x0460001B => retrieve_byte(self.dom1_pulse_width.into(), address),
+
+            0x0460001C..=0x0460001F => retrieve_byte(self.dom1_page_size.into(), address),
+
+            0x04600020..=0x04600023 => retrieve_byte(self.dom1_release.into(), address),
+
+            0x04600024..=0x04600027 => retrieve_byte(self.dom2_latency.into(), address),
+
+            0x04600028..=0x0460002B => retrieve_byte(self.dom2_pulse_width.into(), address),
+
+            0x0460002C..=0x0460002F => retrieve_byte(self.dom2_page_size.into(), address),
+
+            0x04600030..=0x04600033 => retrieve_byte(self.dom2_release.into(), address),
+
             0x04600048..=0x0460004B => retrieve_byte(
                 self.flash_ctrl
                     .with_multi_cycle(self.flash_double_error)
@@ -413,15 +478,49 @@ impl Pi {
                 self.status.set_error(false);
             }
 
+            0x04600014..=0x04600017 => {
+                self.dom1_latency = merge_byte(self.dom1_latency.into(), address, val).into()
+            }
+
+            0x04600018..=0x0460001B => {
+                self.dom1_pulse_width =
+                    merge_byte(self.dom1_pulse_width.into(), address, val).into()
+            }
+
+            0x0460001C..=0x0460001F => {
+                self.dom1_page_size = merge_byte(self.dom1_page_size.into(), address, val).into()
+            }
+
+            0x04600020..=0x04600023 => {
+                self.dom1_release = merge_byte(self.dom1_release.into(), address, val).into()
+            }
+
+            0x04600024..=0x04600027 => {
+                self.dom2_latency = merge_byte(self.dom2_latency.into(), address, val).into()
+            }
+
+            0x04600028..=0x0460002B => {
+                self.dom2_pulse_width =
+                    merge_byte(self.dom2_pulse_width.into(), address, val).into()
+            }
+
+            0x0460002C..=0x0460002F => {
+                self.dom2_page_size = merge_byte(self.dom2_page_size.into(), address, val).into()
+            }
+
+            0x04600030..=0x04600033 => {
+                self.dom2_release = merge_byte(self.dom2_release.into(), address, val).into()
+            }
+
             0x04600048..=0x0460004B => {
                 self.flash_ctrl = merge_byte(self.flash_ctrl.into(), address, val).into();
                 if (address & 3) == 3 {
-                    println!("{:#X?}\n{:08X}", self.flash_ctrl, self.flash_addr.addr());
+                    //println!("{:#X?}\n{:08X}", self.flash_ctrl, self.flash_addr.addr());
                     if self.flash_ctrl.run() {
                         //self.flash_busy = true;
                         let nand_addr = self.flash_addr.addr() as usize;
                         let spare_addr = (nand_addr / 0x4000) * 0x10;
-                        println!("nand: {nand_addr:08X}, spare: {spare_addr:08X}");
+                        //println!("nand: {nand_addr:08X}, spare: {spare_addr:08X}");
                         let buf_addr = (self.flash_ctrl.buf() as usize) * 0x200;
                         let oob_addr = 0x400 + (self.flash_ctrl.buf() as usize) * 0x10;
                         self.buf[buf_addr..buf_addr + 0x200]
@@ -435,7 +534,7 @@ impl Pi {
             0x04600050..=0x04600053 => {
                 self.aes_ctrl = merge_byte(self.aes_ctrl.into(), address, val).into();
                 if (address & 3) == 3 {
-                    println!("{:#X?}", self.aes_ctrl);
+                    //println!("{:#X?}", self.aes_ctrl);
 
                     if self.aes_ctrl.run() {
                         //self.aes_busy = true;
@@ -451,7 +550,7 @@ impl Pi {
                         let enc_offset = self.aes_ctrl.data() as usize;
                         let enc_len = self.aes_ctrl.len() as usize;
                         let enc = &self.buf[enc_offset * 16..(enc_offset + enc_len + 1) * 16];
-                        println!("key: {key:02X?}, iv: {iv:02X?}");
+                        //println!("key: {key:02X?}, iv: {iv:02X?}");
                         let dec = aes_dec_cbc(enc, key, iv, None).expect("decryption failed");
 
                         self.last_block.copy_from_slice(

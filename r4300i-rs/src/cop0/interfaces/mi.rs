@@ -97,6 +97,27 @@ pub struct SecTimer {
 #[bitfield]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
+pub struct AVCtrl {
+    standby: bool,
+    divreset: bool,
+    frange: B2,
+    mdiv: B5,
+    ndiv: B7,
+    pdiv: B3,
+    dac_power: bool,
+    venc_vntpl: bool,
+    venc_vmpal: bool,
+    venc_vtrap: bool,
+    venc_test: bool,
+    pll_bypass: bool,
+    av_reset: bool,
+    #[skip]
+    __: B6,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
 pub struct EIntr {
     #[skip]
     __: B6,
@@ -148,6 +169,8 @@ pub struct Mi {
 
     pub mapping_changed: bool,
 
+    av_control: AVCtrl,
+
     eintr: EIntr,
     eintr_mask: EIntrMask,
 }
@@ -166,6 +189,7 @@ impl Mi {
             sec_vtimer: SecTimer::new(),
             sec_vtimer_count: 0,
             mapping_changed: false,
+            av_control: AVCtrl::new(),
             eintr: EIntr::new(),
             eintr_mask: EIntrMask::new(),
         }
@@ -206,6 +230,8 @@ impl Mi {
                 self.sec_vtimer.with_prescale(self.sec_vtimer_count).into(),
                 address,
             ),
+
+            0x04300030..=0x04300033 => retrieve_byte(self.av_control.into(), address),
 
             0x04300038..=0x0430003B => retrieve_byte(self.eintr.into(), address),
 
@@ -304,6 +330,10 @@ impl Mi {
             0x0430001C..=0x0430001F => {
                 self.sec_vtimer = merge_byte(self.sec_vtimer.into(), address, val).into();
                 self.sec_vtimer_count = self.sec_vtimer.prescale();
+            }
+
+            0x04300030..=0x04300033 => {
+                self.av_control = merge_byte(self.av_control.into(), address, val).into()
             }
 
             0x04300038..=0x0430003B => {

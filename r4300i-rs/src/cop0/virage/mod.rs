@@ -209,7 +209,6 @@ impl Virage2 {
 
     pub fn set_ctrl(&mut self, val: word) {
         self.ctrl = val.into();
-        println!("{:?}", self.ctrl);
         self.command = self.ctrl.cmd();
     }
 
@@ -239,7 +238,6 @@ impl Virage2 {
 
     pub fn set_nms(&mut self, val: word) {
         self.nms = val.into();
-        println!("{:?}", self.nms);
         self.command = self.nms.cmd();
     }
 
@@ -269,7 +267,6 @@ impl Virage2 {
 
     pub fn set_cp(&mut self, val: word) {
         self.cp = val.into();
-        println!("{:?}", self.cp);
         self.command = self.cp.cmd();
     }
 }

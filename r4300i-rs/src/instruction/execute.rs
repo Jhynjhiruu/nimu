@@ -1,3 +1,5 @@
+use crate::cop0::registers;
+use crate::cop0::tlb::TLBEntry;
 use crate::types::*;
 use crate::{Exception, ExceptionType, R4300i, Register};
 
@@ -6,6 +8,10 @@ use super::Instruction;
 const DEFAULT_READ_VALUE: qword = 0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE;
 
 pub type InstructionFunction = fn(&Instruction, &mut R4300i);
+
+pub type DelaySlotFunction = fn(&Instruction, &mut R4300i, dword, bool);
+
+pub type DelaySlot = (DelaySlotFunction, dword, bool);
 
 pub fn get_instruction_function(instr: &Instruction) -> InstructionFunction {
     match instr {
@@ -22,20 +28,20 @@ pub fn get_instruction_function(instr: &Instruction) -> InstructionFunction {
         Instruction::Break(_) => todo!(),
         Instruction::Sync(_) => todo!(),
         Instruction::Mfhi(_) => mfhi,
-        Instruction::Mthi(_) => todo!(),
+        Instruction::Mthi(_) => mthi,
         Instruction::Mflo(_) => mflo,
-        Instruction::Mtlo(_) => todo!(),
+        Instruction::Mtlo(_) => mtlo,
         Instruction::Dsllv(_) => todo!(),
         Instruction::Dsrlv(_) => todo!(),
         Instruction::Dsrav(_) => todo!(),
         Instruction::Mult(_) => mult,
-        Instruction::Multu(_) => todo!(),
+        Instruction::Multu(_) => multu,
         Instruction::Div(_) => div,
         Instruction::Divu(_) => divu,
         Instruction::Dmult(_) => todo!(),
         Instruction::Dmultu(_) => todo!(),
         Instruction::Ddiv(_) => todo!(),
-        Instruction::Ddivu(_) => todo!(),
+        Instruction::Ddivu(_) => ddivu,
         Instruction::Add(_) => add,
         Instruction::Addu(_) => addu,
         Instruction::Sub(_) => todo!(),
@@ -49,7 +55,7 @@ pub fn get_instruction_function(instr: &Instruction) -> InstructionFunction {
         Instruction::Dadd(_) => todo!(),
         Instruction::Daddu(_) => daddu,
         Instruction::Dsub(_) => todo!(),
-        Instruction::Dsubu(_) => todo!(),
+        Instruction::Dsubu(_) => dsubu,
         Instruction::Tge(_) => todo!(),
         Instruction::Tgeu(_) => todo!(),
         Instruction::Tlt(_) => todo!(),
@@ -61,7 +67,7 @@ pub fn get_instruction_function(instr: &Instruction) -> InstructionFunction {
         Instruction::Dsra(_) => todo!(),
         Instruction::Dsll32(_) => dsll32,
         Instruction::Dsrl32(_) => dsrl32,
-        Instruction::Dsra32(_) => todo!(),
+        Instruction::Dsra32(_) => dsra32,
         Instruction::Bltz(_) => bltz,
         Instruction::Bgez(_) => bgez,
         Instruction::Bltzl(_) => bltzl,
@@ -78,12 +84,14 @@ pub fn get_instruction_function(instr: &Instruction) -> InstructionFunction {
         Instruction::Bgezall(_) => todo!(),
         Instruction::Mfc0(_) => mfc0,
         Instruction::Mtc0(_) => mtc0,
+        Instruction::Tlbwi(_) => tlbwi,
+        Instruction::Eret(_) => eret,
         Instruction::Mfc1(_) => todo!(),
         Instruction::Dmfc1(_) => todo!(),
-        Instruction::Cfc1(_) => todo!(),
+        Instruction::Cfc1(_) => cfc1,
         Instruction::Mtc1(_) => todo!(),
         Instruction::Dmtc1(_) => todo!(),
-        Instruction::Ctc1(_) => todo!(),
+        Instruction::Ctc1(_) => ctc1,
         Instruction::Bc1f(_) => todo!(),
         Instruction::Bc1t(_) => todo!(),
         Instruction::Bc1fl(_) => todo!(),
@@ -138,7 +146,7 @@ pub fn get_instruction_function(instr: &Instruction) -> InstructionFunction {
         Instruction::Lbu(_) => lbu,
         Instruction::Lhu(_) => lhu,
         Instruction::Lwr(_) => todo!(),
-        Instruction::Lwu(_) => todo!(),
+        Instruction::Lwu(_) => lwu,
         Instruction::Sb(_) => sb,
         Instruction::Sh(_) => sh,
         Instruction::Swl(_) => todo!(),
@@ -193,6 +201,30 @@ macro_rules! set_cop0_reg {
     };
 }
 
+macro_rules! get_cop1_reg {
+    ($c:expr, $s:expr, $t:ty) => {
+        $c.get_fpu_reg($s.into()) as $t
+    };
+}
+
+macro_rules! set_cop1_reg {
+    ($c:expr, $s:expr, $v:expr) => {
+        $c.set_fpu_reg($s.into(), $v)
+    };
+}
+
+macro_rules! get_cop1_control_reg {
+    ($c:expr, $s:expr, $t:ty) => {
+        $c.state.get_fp_control_reg($s.into()) as $t
+    };
+}
+
+macro_rules! set_cop1_control_reg {
+    ($c:expr, $s:expr, $v:expr) => {
+        $c.state.set_fp_control_reg($s.into(), $v)
+    };
+}
+
 macro_rules! advance_pc {
     ($c:expr) => {
         $c.state.set_pc($c.state.get_pc().wrapping_add(4))
@@ -206,23 +238,32 @@ macro_rules! link {
     };
 }
 
-const BRANCH_FUNCTION: InstructionFunction = |_: &Instruction, cpu: &mut R4300i| {
-    if cpu.delay_slot_condition {
+const BRANCH_FUNCTION: DelaySlotFunction =
+    |_: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, delay_slot_condition: bool| {
+        if delay_slot_condition {
+            cpu.state
+                .set_pc(cpu.state.get_pc().wrapping_add(delay_slot_target));
+        } else {
+            advance_pc!(cpu);
+        }
+    };
+
+const JUMP_FUNCTION: DelaySlotFunction =
+    |_: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
         cpu.state
-            .set_pc(cpu.state.get_pc().wrapping_add(cpu.delay_slot_target));
-    } else {
-        advance_pc!(cpu);
-    }
-};
+            .set_pc((cpu.state.get_pc() & 0xFFFFFFFF_F0000000) | (delay_slot_target << 2));
+    };
 
-const JUMP_FUNCTION: InstructionFunction = |_: &Instruction, cpu: &mut R4300i| {
-    cpu.state
-        .set_pc((cpu.state.get_pc() & 0xFFFFFFFF_F0000000) | (cpu.delay_slot_target << 2));
-};
+const JUMP_REGISTER_FUNCTION: DelaySlotFunction =
+    |_: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
+        cpu.state.set_pc(delay_slot_target);
+    };
 
-const JUMP_REGISTER_FUNCTION: InstructionFunction = |_: &Instruction, cpu: &mut R4300i| {
-    cpu.state.set_pc(cpu.delay_slot_target);
-};
+macro_rules! delay_slot {
+    ($c:expr, $f:expr, $t: expr, $cond:expr) => {
+        $c.delay_slot.push_back(($f, $t, $cond))
+    };
+}
 
 fn none(instr: &Instruction, cpu: &mut R4300i) {
     cpu.throw_exception(Exception::new(ExceptionType::ReservedInstruction));
@@ -292,9 +333,12 @@ fn jr(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = get_reg!(cpu, dec.source1(), _);
-
-    cpu.delay_slot = Some(JUMP_REGISTER_FUNCTION);
+    delay_slot!(
+        cpu,
+        JUMP_REGISTER_FUNCTION,
+        get_reg!(cpu, dec.source1(), _),
+        true
+    )
 }
 
 fn jalr(instr: &Instruction, cpu: &mut R4300i) {
@@ -302,11 +346,14 @@ fn jalr(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = get_reg!(cpu, dec.source1(), _);
-
     link!(cpu, dec.dest(), 8);
 
-    cpu.delay_slot = Some(JUMP_REGISTER_FUNCTION);
+    delay_slot!(
+        cpu,
+        JUMP_REGISTER_FUNCTION,
+        get_reg!(cpu, dec.source1(), _),
+        true
+    )
 }
 
 fn mfhi(instr: &Instruction, cpu: &mut R4300i) {
@@ -317,12 +364,28 @@ fn mfhi(instr: &Instruction, cpu: &mut R4300i) {
     set_reg!(cpu, dec.dest(), cpu.state.get_hi());
 }
 
+fn mthi(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Mthi(dec) = instr else {
+        unreachable!()
+    };
+
+    cpu.state.set_hi(get_reg!(cpu, dec.source1(), _));
+}
+
 fn mflo(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Mflo(dec) = instr else {
         unreachable!()
     };
 
     set_reg!(cpu, dec.dest(), cpu.state.get_lo());
+}
+
+fn mtlo(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Mtlo(dec) = instr else {
+        unreachable!()
+    };
+
+    cpu.state.set_lo(get_reg!(cpu, dec.source1(), _));
 }
 
 fn mult(instr: &Instruction, cpu: &mut R4300i) {
@@ -337,6 +400,20 @@ fn mult(instr: &Instruction, cpu: &mut R4300i) {
 
     cpu.state.set_lo(sign_extend_word(lower_word(result as _)));
     cpu.state.set_hi(sign_extend_word(upper_word(result as _)));
+}
+
+fn multu(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Multu(dec) = instr else {
+        unreachable!()
+    };
+
+    let source1 = get_reg!(cpu, dec.source1(), word);
+    let source2 = get_reg!(cpu, dec.source2(), word);
+
+    let result = source1 as dword * source2 as dword;
+
+    cpu.state.set_lo(sign_extend_word(lower_word(result)));
+    cpu.state.set_hi(sign_extend_word(upper_word(result)));
 }
 
 fn div(instr: &Instruction, cpu: &mut R4300i) {
@@ -371,6 +448,22 @@ fn divu(instr: &Instruction, cpu: &mut R4300i) {
 
     cpu.state.set_lo(sign_extend_word((source1 / source2) as _));
     cpu.state.set_hi(sign_extend_word((source1 % source2) as _));
+}
+
+fn ddivu(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Ddivu(dec) = instr else {
+        unreachable!()
+    };
+
+    let source1 = get_reg!(cpu, dec.source1(), dword);
+    let source2 = get_reg!(cpu, dec.source2(), dword);
+
+    if source2 == 0 {
+        return;
+    }
+
+    cpu.state.set_lo(source1 / source2);
+    cpu.state.set_hi(source1 % source2);
 }
 
 fn add(instr: &Instruction, cpu: &mut R4300i) {
@@ -496,6 +589,19 @@ fn daddu(instr: &Instruction, cpu: &mut R4300i) {
     set_reg!(cpu, dec.dest(), result);
 }
 
+fn dsubu(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Dsubu(dec) = instr else {
+        unreachable!()
+    };
+
+    let source1 = get_reg!(cpu, dec.source1(), dword);
+    let source2 = get_reg!(cpu, dec.source2(), dword);
+
+    let result = source1.wrapping_sub(source2);
+
+    set_reg!(cpu, dec.dest(), result);
+}
+
 fn dsll(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Dsll(dec) = instr else {
         unreachable!()
@@ -529,15 +635,28 @@ fn dsrl32(instr: &Instruction, cpu: &mut R4300i) {
     set_reg!(cpu, dec.dest(), source >> shift_amt);
 }
 
+fn dsra32(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Dsra32(dec) = instr else {
+        unreachable!()
+    };
+
+    let source = get_reg!(cpu, dec.source2(), sdword);
+    let shift_amt = dec.shift_amt() + 32;
+
+    set_reg!(cpu, dec.dest(), (source >> shift_amt) as _);
+}
+
 fn bltz(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Bltz(dec) = instr else {
         unreachable!()
     };
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition = get_reg!(cpu, dec.source1(), sword) < 0;
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), sword) < 0
+    )
 }
 
 fn bgez(instr: &Instruction, cpu: &mut R4300i) {
@@ -545,10 +664,12 @@ fn bgez(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition = get_reg!(cpu, dec.source1(), sword) >= 0;
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), sword) >= 0
+    )
 }
 
 fn bltzl(instr: &Instruction, cpu: &mut R4300i) {
@@ -558,10 +679,12 @@ fn bltzl(instr: &Instruction, cpu: &mut R4300i) {
 
     cpu.is_branch_likely = true;
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition = get_reg!(cpu, dec.source1(), sword) < 0;
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), sword) < 0
+    )
 }
 
 fn bgezl(instr: &Instruction, cpu: &mut R4300i) {
@@ -571,10 +694,12 @@ fn bgezl(instr: &Instruction, cpu: &mut R4300i) {
 
     cpu.is_branch_likely = true;
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition = get_reg!(cpu, dec.source1(), sword) >= 0;
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), sword) >= 0
+    )
 }
 
 fn mfc0(instr: &Instruction, cpu: &mut R4300i) {
@@ -582,21 +707,19 @@ fn mfc0(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = get_cop0_reg!(cpu, dec.dest(), _);
-    cpu.delay_slot_condition = true;
+    delay_slot!(
+        cpu,
+        |instr: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
+            let Instruction::Mfc0(dec) = instr else {
+                unreachable!()
+            };
 
-    cpu.delay_slot = Some(|instr: &Instruction, cpu: &mut R4300i| {
-        let Instruction::Mfc0(dec) = instr else {
-            unreachable!()
-        };
-
-        set_reg!(
-            cpu,
-            dec.source(),
-            sign_extend_word(cpu.delay_slot_target as _)
-        );
-        advance_pc!(cpu);
-    })
+            set_reg!(cpu, dec.source(), sign_extend_word(delay_slot_target as _));
+            advance_pc!(cpu);
+        },
+        get_cop0_reg!(cpu, dec.dest(), _),
+        true
+    )
 }
 
 fn mtc0(instr: &Instruction, cpu: &mut R4300i) {
@@ -604,17 +727,157 @@ fn mtc0(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = get_reg!(cpu, dec.source(), dword);
-    cpu.delay_slot_condition = true;
+    delay_slot!(
+        cpu,
+        |instr: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
+            let Instruction::Mtc0(dec) = instr else {
+                unreachable!()
+            };
 
-    cpu.delay_slot = Some(|instr: &Instruction, cpu: &mut R4300i| {
-        let Instruction::Mtc0(dec) = instr else {
-            unreachable!()
-        };
+            set_cop0_reg!(cpu, dec.dest(), delay_slot_target as _);
+            advance_pc!(cpu);
+        },
+        get_reg!(cpu, dec.source(), dword),
+        true
+    )
+}
 
-        set_cop0_reg!(cpu, dec.dest(), cpu.delay_slot_target as _);
-        advance_pc!(cpu);
-    });
+fn tlbwi(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Tlbwi(dec) = instr else {
+        unreachable!()
+    };
+
+    delay_slot!(
+        cpu,
+        |instr: &Instruction, cpu: &mut R4300i, _: dword, _: bool| {
+            let Instruction::Tlbwi(_) = instr else {
+                unreachable!()
+            };
+
+            let index = cpu
+                .cop0
+                .state
+                .get_reg::<registers::Index>(crate::cop0::Register::Index);
+
+            let page_mask = cpu
+                .cop0
+                .state
+                .get_reg::<registers::PageMask>(crate::cop0::Register::PageMask);
+            let entry_hi = cpu
+                .cop0
+                .state
+                .get_reg::<registers::EntryHi>(crate::cop0::Register::EntryHi);
+            let entry_lo_0 = cpu
+                .cop0
+                .state
+                .get_reg::<registers::EntryLo>(crate::cop0::Register::EntryLo0);
+            let entry_lo_1 = cpu
+                .cop0
+                .state
+                .get_reg::<registers::EntryLo>(crate::cop0::Register::EntryLo1);
+
+            let entry = TLBEntry::new()
+                .with_page_mask(page_mask)
+                .with_entry_hi(entry_hi)
+                .with_entry_lo_0(entry_lo_0)
+                .with_entry_lo_1(entry_lo_1);
+
+            println!("writing tlb entry 0x{:02X}: {entry:?}", index.index());
+
+            cpu.cop0.state.set_tlb_entry(index.index() as _, entry);
+            advance_pc!(cpu);
+        },
+        0,
+        true
+    )
+}
+
+fn eret(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Eret(_) = instr else {
+        unreachable!()
+    };
+
+    cpu.is_branch_likely = true;
+
+    delay_slot!(
+        cpu,
+        |instr: &Instruction, cpu: &mut R4300i, _: dword, _: bool| {
+            let Instruction::Eret(_) = instr else {
+                unreachable!()
+            };
+
+            let mut status = cpu
+                .cop0
+                .state
+                .get_reg::<crate::cop0::registers::Status>(crate::cop0::Register::Status);
+
+            if status.erl() {
+                status.set_erl(false);
+
+                let epc = cpu
+                    .cop0
+                    .state
+                    .get_reg::<crate::cop0::registers::ErrorEpc>(crate::cop0::Register::ErrorEpc);
+
+                cpu.state.set_pc(sign_extend_word(epc.error_epc()));
+            } else {
+                status.set_exl(false);
+
+                let epc = cpu
+                    .cop0
+                    .state
+                    .get_reg::<crate::cop0::registers::Epc>(crate::cop0::Register::Epc);
+
+                cpu.state.set_pc(sign_extend_word(epc.epc()));
+            }
+
+            cpu.cop0
+                .state
+                .set_reg(crate::cop0::Register::Status, status);
+        },
+        0,
+        false
+    );
+}
+
+fn cfc1(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Cfc1(dec) = instr else {
+        unreachable!()
+    };
+
+    delay_slot!(
+        cpu,
+        |instr: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
+            let Instruction::Cfc1(dec) = instr else {
+                unreachable!()
+            };
+
+            set_reg!(cpu, dec.gpr(), sign_extend_word(delay_slot_target as _));
+            advance_pc!(cpu);
+        },
+        get_cop1_control_reg!(cpu, dec.fpr(), _),
+        true
+    )
+}
+
+fn ctc1(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Ctc1(dec) = instr else {
+        unreachable!()
+    };
+
+    delay_slot!(
+        cpu,
+        |instr: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
+            let Instruction::Ctc1(dec) = instr else {
+                unreachable!()
+            };
+
+            set_cop1_control_reg!(cpu, dec.fpr(), delay_slot_target as _);
+            advance_pc!(cpu);
+        },
+        get_reg!(cpu, dec.gpr(), dword),
+        true
+    )
 }
 
 fn j(instr: &Instruction, cpu: &mut R4300i) {
@@ -622,9 +885,7 @@ fn j(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = dec.target() as _;
-
-    cpu.delay_slot = Some(JUMP_FUNCTION);
+    delay_slot!(cpu, JUMP_FUNCTION, dec.target() as dword, true)
 }
 
 fn jal(instr: &Instruction, cpu: &mut R4300i) {
@@ -632,11 +893,9 @@ fn jal(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = dec.target() as _;
-
     link!(cpu, Register::Ra, 8);
 
-    cpu.delay_slot = Some(JUMP_FUNCTION);
+    delay_slot!(cpu, JUMP_FUNCTION, dec.target() as dword, true)
 }
 
 fn beq(instr: &Instruction, cpu: &mut R4300i) {
@@ -644,11 +903,12 @@ fn beq(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition =
-        get_reg!(cpu, dec.source1(), dword) == get_reg!(cpu, dec.source2(), dword);
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), dword) == get_reg!(cpu, dec.source2(), dword)
+    )
 }
 
 fn bne(instr: &Instruction, cpu: &mut R4300i) {
@@ -656,11 +916,12 @@ fn bne(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition =
-        get_reg!(cpu, dec.source1(), dword) != get_reg!(cpu, dec.source2(), dword);
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), dword) != get_reg!(cpu, dec.source2(), dword)
+    )
 }
 
 fn blez(instr: &Instruction, cpu: &mut R4300i) {
@@ -668,10 +929,12 @@ fn blez(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition = get_reg!(cpu, dec.source1(), sword) <= 0;
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), sword) <= 0
+    )
 }
 
 fn bgtz(instr: &Instruction, cpu: &mut R4300i) {
@@ -679,10 +942,12 @@ fn bgtz(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition = get_reg!(cpu, dec.source1(), sword) > 0;
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), sword) > 0
+    )
 }
 
 fn addi(instr: &Instruction, cpu: &mut R4300i) {
@@ -790,11 +1055,12 @@ fn beql(instr: &Instruction, cpu: &mut R4300i) {
 
     cpu.is_branch_likely = true;
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition =
-        get_reg!(cpu, dec.source1(), dword) == get_reg!(cpu, dec.source2(), dword);
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), dword) == get_reg!(cpu, dec.source2(), dword)
+    )
 }
 
 fn bnel(instr: &Instruction, cpu: &mut R4300i) {
@@ -804,11 +1070,12 @@ fn bnel(instr: &Instruction, cpu: &mut R4300i) {
 
     cpu.is_branch_likely = true;
 
-    cpu.delay_slot_target = sign_extend_hword_twice(dec.imm()) << 2;
-    cpu.delay_slot_condition =
-        get_reg!(cpu, dec.source1(), dword) != get_reg!(cpu, dec.source2(), dword);
-
-    cpu.delay_slot = Some(BRANCH_FUNCTION);
+    delay_slot!(
+        cpu,
+        BRANCH_FUNCTION,
+        sign_extend_hword_twice(dec.imm()) << 2,
+        get_reg!(cpu, dec.source1(), dword) != get_reg!(cpu, dec.source2(), dword)
+    )
 }
 
 fn daddiu(instr: &Instruction, cpu: &mut R4300i) {
@@ -944,6 +1211,20 @@ fn lhu(instr: &Instruction, cpu: &mut R4300i) {
     set_reg!(cpu, dec.source2(), val as _);
 }
 
+fn lwu(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Lwu(dec) = instr else {
+        unreachable!()
+    };
+
+    let base = get_reg!(cpu, dec.source1(), dword);
+    let offset = sign_extend_hword_twice(dec.imm());
+
+    let val = cpu
+        .read::<word>(base.wrapping_add(offset) as _)
+        .unwrap_or(DEFAULT_READ_VALUE as _);
+    set_reg!(cpu, dec.source2(), val as _);
+}
+
 fn sb(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Sb(dec) = instr else {
         unreachable!()
@@ -1021,7 +1302,7 @@ fn sdr(instr: &Instruction, cpu: &mut R4300i) {
 }
 
 fn cache(instr: &Instruction, cpu: &mut R4300i) {
-    eprintln!("CACHE operation unimplemented; skipping");
+    //eprintln!("CACHE operation unimplemented; skipping");
 }
 
 fn ld(instr: &Instruction, cpu: &mut R4300i) {

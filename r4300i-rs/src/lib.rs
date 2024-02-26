@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt::Debug;
 
 use num_traits::{FromBytes, ToBytes};
@@ -7,7 +8,7 @@ mod instruction;
 pub mod types;
 
 use cop0::{Cop0, ResetType};
-use instruction::execute::InstructionFunction;
+use instruction::execute::{DelaySlot, InstructionFunction};
 use instruction::Instruction;
 use types::*;
 
@@ -203,6 +204,23 @@ pub enum FpRegister {
     F31,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FpControl {
+    Version,
+    Control,
+}
+
+impl From<u8> for FpControl {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Version,
+            31 => Self::Control,
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct State {
     pc: dword,
@@ -212,6 +230,8 @@ pub struct State {
 
     registers: [dword; Self::NUM_REGISTERS],
     fp_registers: [f64; Self::NUM_FP_REGISTERS],
+
+    fp_control_registers: [word; 2],
 }
 
 impl State {
@@ -274,6 +294,14 @@ impl State {
 
     pub fn set_fp_reg(&mut self, reg: FpRegister, val: f64) {
         self.fp_registers[reg as usize] = val;
+    }
+
+    pub fn get_fp_control_reg(&self, reg: FpControl) -> word {
+        self.fp_control_registers[reg as usize]
+    }
+
+    pub fn set_fp_control_reg(&mut self, reg: FpControl, val: word) {
+        self.fp_control_registers[reg as usize] = val;
     }
 }
 
@@ -411,10 +439,8 @@ pub struct R4300i {
     coc0: bool,
     coc1: bool,
 
-    delay_slot: Option<InstructionFunction>,
+    delay_slot: VecDeque<DelaySlot>,
     is_branch_likely: bool,
-    delay_slot_target: dword,
-    delay_slot_condition: bool,
 
     did_cold_reset: bool,
     did_soft_reset: bool,
@@ -429,6 +455,8 @@ pub struct R4300i {
     cur_instruction: Option<Instruction>,
 
     exception: Exception,
+
+    video_timer: word,
 }
 
 impl R4300i {
@@ -468,10 +496,8 @@ impl R4300i {
             cop0: Cop0::new(reset_type, bootrom, v0, v1, v2, nand, spare),
             coc0: false,
             coc1: false,
-            delay_slot: None,
+            delay_slot: VecDeque::new(),
             is_branch_likely: false,
-            delay_slot_target: 0,
-            delay_slot_condition: false,
             did_cold_reset,
             did_soft_reset,
             did_nmi,
@@ -481,6 +507,7 @@ impl R4300i {
             prev_instruction: None,
             cur_instruction: None,
             exception: Exception::default(),
+            video_timer: 0,
         }
     }
 
@@ -549,6 +576,18 @@ impl R4300i {
             cause.set_ip(cause.ip() | 0x80);
             self.cop0.state.set_reg(cop0::Register::Cause, cause);
         }
+
+        self.video_timer += 1;
+        if self.video_timer == 2500000 {
+            if self.cop0.vi_frame() {
+                self.throw_exception(Exception::new(ExceptionType::Interrupt))
+            }
+            self.video_timer = 0;
+        }
+
+        if self.logging {
+            println!("{:016X?}", self.state.registers);
+        }
     }
 
     pub fn read<T>(&mut self, address: word) -> Option<T>
@@ -564,6 +603,7 @@ impl R4300i {
                 None
             }
             cop0::TLBResult::Exception(e) => {
+                println!("exception at {:016X}", self.get_pc());
                 self.throw_exception(e);
                 None
             }
@@ -575,17 +615,14 @@ impl R4300i {
         T: ToBytes,
         <T as ToBytes>::Bytes: IntoIterator<Item = byte>,
     {
-        if address == 0xA4600048 {
-            println!(
-                "{:016X}, {:016X}",
-                self.get_pc(),
-                self.get_reg(Register::Ra as _)
-            );
-        }
         match self.cop0.write(address, val) {
             cop0::TLBResult::Ok(_) => {}
             cop0::TLBResult::Shutdown => self.halt(),
-            cop0::TLBResult::Exception(e) => self.throw_exception(e),
+            cop0::TLBResult::Exception(e) => {
+                println!("exception at {:016X}", self.get_pc());
+                self.halt();
+                self.throw_exception(e)
+            }
         }
     }
 
@@ -607,35 +644,34 @@ impl R4300i {
             return;
         };
 
-        if self.logging {
-            println!(
-                "Executing instruction {:016X}: {:X?}",
-                self.state.get_pc(),
-                instr
-            );
-        }
-
-        let run_delay_slot = self.delay_slot.is_some();
+        let run_delay_slot = !self.delay_slot.is_empty();
         let run_instruction = if self.is_branch_likely {
             self.is_branch_likely = false;
 
-            self.delay_slot_condition
+            self.delay_slot[0].2
         } else {
             true
         };
 
         if run_instruction {
+            if self.logging {
+                println!(
+                    "Executing instruction {:016X}: {:X?}",
+                    self.state.get_pc(),
+                    instr
+                );
+            }
+
             instr.execute(self);
         }
 
         if run_delay_slot {
-            if let Some(delay_slot) = self.delay_slot {
+            if let Some((delay_slot, target, cond)) = self.delay_slot.pop_front() {
                 let Some(prev_instr) = self.prev_instruction else {
                     eprintln!("Tried to execute non-existent delay slot");
                     return;
                 };
-                delay_slot(&prev_instr, self);
-                self.delay_slot = None;
+                delay_slot(&prev_instr, self, target, cond);
             } else {
                 eprintln!("Delay slot function should exist");
             }
@@ -664,7 +700,12 @@ impl R4300i {
         }
 
         let mut status: cop0::registers::Status = self.cop0.state.get_reg(cop0::Register::Status);
-        status.set_exl(true);
+
+        match self.exception.exception {
+            ExceptionType::Trap => status.set_erl(true),
+            _ => status.set_exl(true),
+        }
+
         self.cop0.state.set_reg(cop0::Register::Status, status);
 
         match self.exception.exception {
@@ -701,7 +742,7 @@ impl R4300i {
             _ => {
                 let mut epc = self.state.get_pc() as word;
 
-                if self.delay_slot.is_some() {
+                if !self.delay_slot.is_empty() {
                     epc = epc.wrapping_sub(4);
 
                     let mut cause: cop0::registers::Cause =

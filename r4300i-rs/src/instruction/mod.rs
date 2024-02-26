@@ -53,6 +53,17 @@ pub struct C0Format {
 #[bitfield]
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
+pub struct C0SubFormat {
+    sub_opcode: B6,
+    #[skip]
+    __: B19,
+    sub: B1,
+    opcode: B6,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
 pub struct FlsFormat {
     offset: hword,
     source: B5,
@@ -183,6 +194,9 @@ pub enum Instruction {
 
     Mfc0(C0Format),
     Mtc0(C0Format),
+
+    Tlbwi(C0SubFormat),
+    Eret(C0SubFormat),
 
     Mfc1(FmFormat),
     Dmfc1(FmFormat),
@@ -371,7 +385,7 @@ const REGIMM_OPCODE_TABLE: [Option<fn(IFormat) -> Instruction>; 32] = [
     None,
 ];
 
-const COP0_OPCODE_TABLE: [Option<fn(C0Format) -> Instruction>; 32] = [
+const COP0_OPCODE_TABLE: [Option<fn(C0Format) -> Instruction>; 16] = [
     Some(Instruction::Mfc0),
     None,
     None,
@@ -388,6 +402,12 @@ const COP0_OPCODE_TABLE: [Option<fn(C0Format) -> Instruction>; 32] = [
     None,
     None,
     None,
+];
+
+const COP0_SUB_OPCODE_TABLE: [Option<fn(C0SubFormat) -> Instruction>; 32] = [
+    None,
+    None,
+    Some(Instruction::Tlbwi),
     None,
     None,
     None,
@@ -397,6 +417,19 @@ const COP0_OPCODE_TABLE: [Option<fn(C0Format) -> Instruction>; 32] = [
     None,
     None,
     None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    None,
+    Some(Instruction::Eret),
     None,
     None,
     None,
@@ -610,12 +643,24 @@ impl Instruction {
     }
 
     fn new_cop0(value: word) -> Self {
+        const COP0_SUB: byte = 16;
+
         let dec = C0Format::from(value);
         assert_eq!(dec.opcode(), Self::OPC_COP0);
 
-        match COP0_OPCODE_TABLE[dec.format() as usize] {
-            Some(i) => i(dec),
-            None => Instruction::None,
+        match dec.format() {
+            COP0_SUB => {
+                let dec = C0SubFormat::from(value);
+                match COP0_SUB_OPCODE_TABLE[dec.sub_opcode() as usize] {
+                    Some(i) => i(dec),
+                    None => Instruction::None,
+                }
+            }
+
+            _ => match COP0_OPCODE_TABLE[dec.format() as usize] {
+                Some(i) => i(dec),
+                None => Instruction::None,
+            },
         }
     }
 

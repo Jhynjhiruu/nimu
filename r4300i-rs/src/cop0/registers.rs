@@ -1,12 +1,14 @@
 #![allow(unused_braces)]
 
+use std::fmt::Debug;
+
 use crate::types::*;
 
 use modular_bitfield::prelude::*;
 
 use super::Register;
 
-pub trait Cop0Register: Sized {
+pub trait Cop0Register: Sized + Debug {
     fn from_reg(val: word, reg: Register) -> Option<Self>;
     fn as_reg(&self, reg: Register) -> Option<word>;
 }

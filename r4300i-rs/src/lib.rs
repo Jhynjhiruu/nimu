@@ -431,6 +431,15 @@ impl Exception {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecureTrapType {
+    Button,
+    Emulation,
+    Fatal,
+    Timer,
+    App,
+}
+
 #[derive(Debug)]
 pub struct R4300i {
     state: State,
@@ -468,6 +477,8 @@ impl R4300i {
     const TLB_MISS_ADD: dword = 0x0000;
     const XTLB_MISS_ADD: dword = 0x0080;
     const OTHER_ADD: dword = 0x0180;
+
+    const SK_ENTER: dword = 0x9FC00000;
 
     pub fn new(
         bootrom: Vec<byte>,
@@ -532,13 +543,17 @@ impl R4300i {
         self.logging = false;
     }
 
+    pub fn trigger_interrupt(&mut self) {
+        self.cop0.trigger_md_intr();
+    }
+
     pub fn step(&mut self) {
         self.did_cold_reset = false;
         self.did_soft_reset = false;
         self.did_nmi = false;
 
         let mut count: cop0::registers::Count = self.cop0.state.get_reg(cop0::Register::Count);
-        count.set_count(count.count().wrapping_add(1));
+        count.set_count(count.count().wrapping_add(2000000));
         self.cop0.state.set_reg(cop0::Register::Count, count);
 
         if self.running && !self.halted {
@@ -564,29 +579,49 @@ impl R4300i {
             }
 
             self.cop0.state.set_reg(cop0::Register::Random, random);
-
-            self.cop0.dma();
         }
+        let status: cop0::registers::Status = self.cop0.state.get_reg(cop0::Register::Status);
 
         let count: cop0::registers::Count = self.cop0.state.get_reg(cop0::Register::Count);
         let compare: cop0::registers::Compare = self.cop0.state.get_reg(cop0::Register::Compare);
 
+        let mut cause: cop0::registers::Cause = self.cop0.state.get_reg(cop0::Register::Cause);
         if count.count() == compare.compare() {
-            let mut cause: cop0::registers::Cause = self.cop0.state.get_reg(cop0::Register::Cause);
             cause.set_ip(cause.ip() | 0x80);
-            self.cop0.state.set_reg(cop0::Register::Cause, cause);
+        } else {
+            cause.set_ip(cause.ip() & !0x80);
         }
 
+        let mut vi_intr = false;
+
         self.video_timer += 1;
-        if self.video_timer == 2500000 {
-            if self.cop0.vi_frame() {
-                self.throw_exception(Exception::new(ExceptionType::Interrupt))
-            }
+        // not the right number
+        // all the vi timings are horribly awful
+        if self.video_timer == 600 {
+            vi_intr = self.cop0.vi_frame();
             self.video_timer = 0;
         }
 
+        if self.cop0.dma() || self.cop0.card() || vi_intr || self.cop0.module() {
+            cause.set_ip(cause.ip() | 0x04);
+        } else {
+            cause.set_ip(cause.ip() & !0x04);
+        }
+        self.cop0.state.set_reg(cop0::Register::Cause, cause);
+
+        if cause.ip() & status.im() != 0 {
+            self.throw_exception(Exception::new(ExceptionType::Interrupt));
+        }
+
         if self.logging {
-            println!("{:016X?}", self.state.registers);
+            //println!("{:016X?}", self.state.registers);
+            /*println!(
+                "{:08X}",
+                self.cop0
+                    .state
+                    .get_reg::<crate::cop0::registers::Epc>(cop0::Register::Epc)
+                    .epc()
+            )*/
         }
     }
 
@@ -607,6 +642,11 @@ impl R4300i {
                 self.throw_exception(e);
                 None
             }
+            cop0::TLBResult::SecureTrap(t) => {
+                println!("secure trap at {:016X}", self.get_pc());
+                self.secure_trap(t);
+                None
+            }
         }
     }
 
@@ -623,6 +663,7 @@ impl R4300i {
                 self.halt();
                 self.throw_exception(e)
             }
+            _ => unreachable!(),
         }
     }
 
@@ -683,11 +724,42 @@ impl R4300i {
     pub fn throw_exception(&mut self, exception: Exception) {
         if exception.priority() > self.exception.priority() {
             self.exception = exception;
+        } else {
+            /*println!(
+                "priority of {:?} is not higher than current ({:?})",
+                exception, self.exception
+            );*/
         }
     }
 
     fn handle_exception(&mut self) {
-        if self.exception.exception == ExceptionType::None {
+        // i think the interrupt enable handling is wrong
+        // oh well
+        if self.exception.exception == ExceptionType::None
+            || !self
+                .cop0
+                .state
+                .get_reg::<cop0::registers::Status>(cop0::Register::Status)
+                .ie()
+            || self
+                .cop0
+                .state
+                .get_reg::<cop0::registers::Status>(cop0::Register::Status)
+                .exl()
+            || self
+                .cop0
+                .state
+                .get_reg::<cop0::registers::Status>(cop0::Register::Status)
+                .erl()
+        {
+            /*if self.exception.exception != ExceptionType::None {
+                println!(
+                    "do not handle exception: {:?}",
+                    self.cop0
+                        .state
+                        .get_reg::<cop0::registers::Status>(cop0::Register::Status)
+                );
+            }*/
             return;
         }
 
@@ -739,6 +811,29 @@ impl R4300i {
                 self.state.set_pc(Self::RESET_PC);
             }
 
+            ExceptionType::Trap => {
+                let mut epc = self.state.get_pc() as word;
+
+                if !self.delay_slot.is_empty() {
+                    epc = epc.wrapping_sub(4);
+
+                    let mut cause: cop0::registers::Cause =
+                        self.cop0.state.get_reg(cop0::Register::Cause);
+                    cause.set_bd(true);
+                    self.cop0.state.set_reg(cop0::Register::Cause, cause);
+
+                    self.delay_slot.clear();
+                    self.is_branch_likely = false;
+                }
+
+                self.cop0.state.set_reg(
+                    cop0::Register::ErrorEpc,
+                    cop0::registers::ErrorEpc::new().with_error_epc(epc),
+                );
+
+                self.state.set_pc(Self::SK_ENTER);
+            }
+
             _ => {
                 let mut epc = self.state.get_pc() as word;
 
@@ -749,6 +844,9 @@ impl R4300i {
                         self.cop0.state.get_reg(cop0::Register::Cause);
                     cause.set_bd(true);
                     self.cop0.state.set_reg(cop0::Register::Cause, cause);
+
+                    self.delay_slot.clear();
+                    self.is_branch_likely = false;
                 }
 
                 self.cop0.state.set_reg(
@@ -774,6 +872,11 @@ impl R4300i {
         }
 
         self.exception = Exception::default();
+    }
+
+    pub fn secure_trap(&mut self, trap: SecureTrapType) {
+        self.throw_exception(Exception::new(ExceptionType::Trap));
+        self.cop0.set_secure_trap(trap);
     }
 
     pub fn get_pc(&self) -> dword {

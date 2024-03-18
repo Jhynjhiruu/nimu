@@ -3,7 +3,7 @@ use std::iter::IntoIterator;
 use std::mem::size_of;
 
 use crate::{is_ksegdm, k2_to_phys, kdm_to_phys, BOOTROM_BASE};
-use crate::{types::*, ExceptionType};
+use crate::{types::*, ExceptionType, SecureTrapType};
 use crate::{Exception, R4300i};
 
 use num_traits::ops::bytes::{FromBytes, ToBytes};
@@ -245,9 +245,9 @@ impl State {
         T: Cop0Register,
     {
         self.registers[reg as usize] = val.as_reg(reg).expect("illegal register write");
-        if !matches!(reg, Register::Random | Register::Count) {
+        /*if !matches!(reg, Register::Random | Register::Count) {
             println!("cop0 reg {reg:?} write: {val:?}");
-        }
+        }*/
     }
 
     pub fn get_coc(&self) -> bool {
@@ -316,6 +316,8 @@ pub struct Cop0 {
     si: Si,
     usb0: Usb,
     usb1: Usb,
+
+    flash_intr_timer: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +325,7 @@ pub enum TLBResult<T> {
     Ok(T),
     Shutdown,
     Exception(Exception),
+    SecureTrap(SecureTrapType),
 }
 
 impl Cop0 {
@@ -349,6 +352,7 @@ impl Cop0 {
             si: Si::new(),
             usb0: Usb::new(0x04900000),
             usb1: Usb::new(0x04A00000),
+            flash_intr_timer: 0,
         }
     }
 
@@ -384,8 +388,20 @@ impl Cop0 {
         self.mi.get_sec_mode_map()
     }
 
+    pub fn set_secure_trap(&mut self, trap: SecureTrapType) {
+        self.mi.set_secure_trap(trap);
+    }
+
     pub fn vi_frame(&mut self) -> bool {
-        self.vi.frame(Box::as_ref(&self.ram))
+        let vi_intr = self.vi.frame(Box::as_ref(&self.ram));
+
+        self.mi.set_vi_intr(vi_intr);
+
+        vi_intr
+    }
+
+    pub fn trigger_md_intr(&mut self) {
+        self.mi.trigger_md_intr();
     }
 
     fn virt_to_phys(&mut self, address: word, write: bool) -> TLBResult<word> {
@@ -475,12 +491,17 @@ impl Cop0 {
             TLBResult::Ok(a) => a,
             TLBResult::Shutdown => return TLBResult::Shutdown,
             TLBResult::Exception(e) => return TLBResult::Exception(e),
+            _ => unreachable!(),
         };
 
         let watch_lo: WatchLo = self.state.get_reg(Register::WatchLo);
 
         if watch_lo.r() && (address & !7) == watch_lo.p_addr() {
             return TLBResult::Exception(Exception::new(ExceptionType::Watch));
+        }
+
+        if address & !3 == 0x04300014 && !self.mi.is_secure_mode() {
+            return TLBResult::SecureTrap(SecureTrapType::App);
         }
 
         TLBResult::Ok(self.read_phys_addr(address))
@@ -491,6 +512,7 @@ impl Cop0 {
             TLBResult::Ok(a) => a,
             TLBResult::Shutdown => return TLBResult::Shutdown,
             TLBResult::Exception(e) => return TLBResult::Exception(e),
+            _ => unreachable!(),
         };
 
         let watch_lo: WatchLo = self.state.get_reg(Register::WatchLo);
@@ -522,6 +544,7 @@ impl Cop0 {
                 TLBResult::Ok(b) => b,
                 TLBResult::Shutdown => return TLBResult::Shutdown,
                 TLBResult::Exception(e) => return TLBResult::Exception(e),
+                TLBResult::SecureTrap(t) => return TLBResult::SecureTrap(t),
             };
         }
 
@@ -547,13 +570,14 @@ impl Cop0 {
                 TLBResult::Ok(_) => {}
                 TLBResult::Shutdown => return TLBResult::Shutdown,
                 TLBResult::Exception(e) => return TLBResult::Exception(e),
+                _ => unreachable!(),
             }
         }
 
         TLBResult::Ok(())
     }
 
-    pub fn dma(&mut self) {
+    pub fn dma(&mut self) -> bool {
         let dma_queued = self.pi.dma_queued();
 
         if dma_queued {
@@ -567,7 +591,7 @@ impl Cop0 {
                 }
                 Dma::Write(dram_addr, pi_addr, len) => {
                     self.ram[dram_addr as usize..(dram_addr + len) as usize]
-                        .copy_from_slice(self.pi.bus_read(pi_addr, len));
+                        .copy_from_slice(&self.pi.bus_read(pi_addr, len));
                 }
                 Dma::BufRead(dram_addr, pi_addr, len) => {
                     let len = len.min(0x400);
@@ -586,7 +610,37 @@ impl Cop0 {
             }
 
             self.pi.clear_dma();
+
+            self.mi.set_pi_intr()
+        } else {
+            false
         }
+    }
+
+    pub fn card(&mut self) -> bool {
+        let flash_command = self.pi.flash_command();
+
+        if flash_command {
+            if self.flash_intr_timer == 0 {
+                self.flash_intr_timer = 60;
+            }
+
+            self.flash_intr_timer -= 1;
+
+            if self.flash_intr_timer == 0 {
+                self.pi.clear_flash_command();
+
+                self.mi.set_flash_intr()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    pub fn module(&mut self) -> bool {
+        self.mi.md_intr()
     }
 
     fn read_phys_addr(&mut self, address: word) -> byte {
@@ -637,7 +691,7 @@ impl Cop0 {
             todo!()
         } else if (0x10000000..0x1FC00000).contains(&address) {
             // cartridge domain 1
-            todo!()
+            self.pi.read_atb_phys_addr(address)
         } else if (0x1FC00000..0x1FD00000).contains(&address) {
             self.virage.read_phys_addr(address)
         } else {

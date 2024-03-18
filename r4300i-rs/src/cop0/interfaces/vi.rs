@@ -186,9 +186,14 @@ impl Vi {
     pub fn frame<const N: usize>(&mut self, ram: &[byte; N]) -> bool {
         self.current
             .set_half_line((self.current.half_line() + 1) & 0x3FF);
-        match self.control.bit_depth() {
-            BitDepth::None => false,
-            BitDepth::Bits16 | BitDepth::Bits32 => true,
+
+        if self.current.half_line() == self.intr.half_line() {
+            match self.control.bit_depth() {
+                BitDepth::None => false,
+                BitDepth::Bits16 | BitDepth::Bits32 => true,
+            }
+        } else {
+            false
         }
     }
 

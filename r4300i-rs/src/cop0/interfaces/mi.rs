@@ -1,4 +1,4 @@
-use crate::types::*;
+use crate::{types::*, SecureTrapType};
 
 use modular_bitfield::prelude::*;
 
@@ -14,6 +14,20 @@ pub struct Mode {
     clear_dp_interrupt: bool,
     #[skip]
     __: B20,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub struct Intr {
+    sp: bool,
+    si: bool,
+    ai: bool,
+    vi: bool,
+    pi: bool,
+    dp: bool,
+    #[skip]
+    __: B26,
 }
 
 #[bitfield]
@@ -145,8 +159,36 @@ pub struct EIntrMask {
     pi_error: bool,
     usb0: bool,
     usb1: bool,
+    button: bool,
+    module: bool,
     #[skip]
-    __: B20,
+    __: B18,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub struct EIntrMaskWrite {
+    #[skip]
+    __: B12,
+    clear_flash: bool,
+    set_flash: bool,
+    clear_aes: bool,
+    set_aes: bool,
+    clear_ide: bool,
+    set_ide: bool,
+    clear_error: bool,
+    set_error: bool,
+    clear_usb0: bool,
+    set_usb0: bool,
+    clear_usb1: bool,
+    set_usb1: bool,
+    clear_button: bool,
+    set_button: bool,
+    clear_module: bool,
+    set_module: bool,
+    #[skip]
+    __: B4,
 }
 
 #[derive(Debug)]
@@ -154,6 +196,8 @@ pub struct Mi {
     mode: Mode,
     init_mode: bool,
     ebus_test_mode: bool,
+
+    intr: Intr,
 
     intr_mask: IntrMask,
 
@@ -181,9 +225,10 @@ impl Mi {
             mode: Mode::new(),
             init_mode: false,
             ebus_test_mode: false,
+            intr: Intr::new(),
             intr_mask: IntrMask::new(),
             ctrl: Ctrl::new(),
-            sec_mode: SecMode::new().with_map(true),
+            sec_mode: SecMode::new().with_map(true).with_secure_exit(true),
             sec_timer: SecTimer::new(),
             sec_timer_count: 0,
             sec_vtimer: SecTimer::new(),
@@ -199,6 +244,57 @@ impl Mi {
         self.sec_mode.map()
     }
 
+    pub fn is_secure_mode(&self) -> bool {
+        self.sec_mode.secure_exit()
+    }
+
+    pub fn set_flash_intr(&mut self) -> bool {
+        /*println!(
+            "set_flash_intr: {:#?}, {:#?}",
+            self.intr_mask, self.eintr_mask
+        );*/
+
+        if self.intr_mask.pi() && self.eintr_mask.pi_flash() {
+            self.eintr.set_pi_flash(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_pi_intr(&mut self) -> bool {
+        if self.intr_mask.pi() {
+            self.intr.set_pi(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_vi_intr(&mut self, enable: bool) {
+        self.intr.set_vi(enable);
+    }
+
+    pub fn trigger_md_intr(&mut self) {
+        self.eintr.set_module(true);
+    }
+
+    pub fn md_intr(&self) -> bool {
+        self.eintr.module()
+    }
+
+    pub fn set_secure_trap(&mut self, trap: SecureTrapType) {
+        match trap {
+            SecureTrapType::Button => self.sec_mode.set_button(true),
+            SecureTrapType::Emulation => self.sec_mode.set_emulation(true),
+            SecureTrapType::Fatal => self.sec_mode.set_fatal(true),
+            SecureTrapType::Timer => self.sec_mode.set_timer(true),
+            SecureTrapType::App => self.sec_mode.set_app(true),
+        }
+
+        self.sec_mode.set_secure_exit(true);
+    }
+
     pub fn read_phys_addr(&mut self, address: word) -> byte {
         match address {
             0x04300000..=0x04300003 => retrieve_byte(
@@ -208,6 +304,8 @@ impl Mi {
                     .into(),
                 address,
             ),
+
+            0x04300008..=0x0430000B => retrieve_byte(self.intr.into(), address),
 
             0x0430000C..=0x0430000F => retrieve_byte(self.intr_mask.into(), address),
 
@@ -268,6 +366,10 @@ impl Mi {
                     self.mode.set_clear_dp_interrupt(false);
                     // clear the interrupt
                 }
+            }
+
+            0x04300008..=0x0430000B => {
+                self.intr = merge_byte(self.intr.into(), address, val).into()
             }
 
             0x0430000C..=0x0430000F => {
@@ -341,7 +443,63 @@ impl Mi {
             }
 
             0x0430003C..=0x0430003F => {
-                self.eintr_mask = merge_byte(self.eintr_mask.into(), address, val).into()
+                let eintr_mask_write: EIntrMaskWrite = merge_byte(0, address, val).into();
+                if eintr_mask_write.clear_flash() {
+                    self.eintr_mask.set_pi_flash(false);
+                }
+                if eintr_mask_write.set_flash() {
+                    self.eintr_mask.set_pi_flash(true);
+                }
+                if eintr_mask_write.clear_aes() {
+                    self.eintr_mask.set_pi_aes(false);
+                }
+                if eintr_mask_write.set_aes() {
+                    self.eintr_mask.set_pi_aes(true);
+                }
+                if eintr_mask_write.clear_ide() {
+                    self.eintr_mask.set_pi_ide(false);
+                }
+                if eintr_mask_write.set_ide() {
+                    self.eintr_mask.set_pi_ide(true);
+                }
+                if eintr_mask_write.clear_error() {
+                    self.eintr_mask.set_pi_error(false);
+                }
+                if eintr_mask_write.set_error() {
+                    self.eintr_mask.set_pi_error(true);
+                }
+                if eintr_mask_write.clear_usb0() {
+                    self.eintr_mask.set_usb0(false);
+                }
+                if eintr_mask_write.set_usb0() {
+                    self.eintr_mask.set_usb0(true);
+                }
+                if eintr_mask_write.clear_usb1() {
+                    self.eintr_mask.set_usb1(false);
+                }
+                if eintr_mask_write.set_usb1() {
+                    self.eintr_mask.set_usb1(true);
+                }
+                if eintr_mask_write.clear_button() {
+                    self.eintr_mask.set_button(false);
+                }
+                if eintr_mask_write.set_button() {
+                    self.eintr_mask.set_button(true);
+                }
+                if eintr_mask_write.clear_module() {
+                    self.eintr_mask.set_module(false);
+                }
+                if eintr_mask_write.set_module() {
+                    self.eintr_mask.set_module(true);
+                }
+
+                if address & 3 == 3 {
+                    println!(
+                        "write eintr_mask: {:#?}, {:08X}",
+                        self.eintr_mask,
+                        u32::from_le_bytes(self.eintr_mask.bytes)
+                    );
+                }
             }
 
             _ => {

@@ -141,19 +141,19 @@ pub fn get_instruction_function(instr: &Instruction) -> InstructionFunction {
         Instruction::Ldr(_) => ldr,
         Instruction::Lb(_) => lb,
         Instruction::Lh(_) => todo!(),
-        Instruction::Lwl(_) => todo!(),
+        Instruction::Lwl(_) => lwl,
         Instruction::Lw(_) => lw,
         Instruction::Lbu(_) => lbu,
         Instruction::Lhu(_) => lhu,
-        Instruction::Lwr(_) => todo!(),
+        Instruction::Lwr(_) => lwr,
         Instruction::Lwu(_) => lwu,
         Instruction::Sb(_) => sb,
         Instruction::Sh(_) => sh,
-        Instruction::Swl(_) => todo!(),
+        Instruction::Swl(_) => swl,
         Instruction::Sw(_) => sw,
         Instruction::Sdl(_) => sdl,
         Instruction::Sdr(_) => sdr,
-        Instruction::Swr(_) => todo!(),
+        Instruction::Swr(_) => swr,
         Instruction::Cache(_) => cache,
         Instruction::Ll(_) => todo!(),
         Instruction::Lwc1(_) => todo!(),
@@ -702,32 +702,39 @@ fn bgezl(instr: &Instruction, cpu: &mut R4300i) {
     )
 }
 
+// is mfc0 supposed to do the store at I + 1???? i don't know!!!! the manual says so, but ares says no
 fn mfc0(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Mfc0(dec) = instr else {
         unreachable!()
     };
 
-    delay_slot!(
+    /*delay_slot!(
         cpu,
         |instr: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
             let Instruction::Mfc0(dec) = instr else {
                 unreachable!()
             };
-
+            
             set_reg!(cpu, dec.source(), sign_extend_word(delay_slot_target as _));
             advance_pc!(cpu);
         },
         get_cop0_reg!(cpu, dec.dest(), _),
         true
-    )
+    )*/
+    set_reg!(
+        cpu,
+        dec.source(),
+        sign_extend_word(get_cop0_reg!(cpu, dec.dest(), _))
+    );
 }
 
+// same here
 fn mtc0(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Mtc0(dec) = instr else {
         unreachable!()
     };
 
-    delay_slot!(
+    /*delay_slot!(
         cpu,
         |instr: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
             let Instruction::Mtc0(dec) = instr else {
@@ -739,7 +746,8 @@ fn mtc0(instr: &Instruction, cpu: &mut R4300i) {
         },
         get_reg!(cpu, dec.source(), dword),
         true
-    )
+    )*/
+    set_cop0_reg!(cpu, dec.dest(), get_reg!(cpu, dec.source(), _));
 }
 
 fn tlbwi(instr: &Instruction, cpu: &mut R4300i) {
@@ -820,6 +828,8 @@ fn eret(instr: &Instruction, cpu: &mut R4300i) {
                     .get_reg::<crate::cop0::registers::ErrorEpc>(crate::cop0::Register::ErrorEpc);
 
                 cpu.state.set_pc(sign_extend_word(epc.error_epc()));
+
+                println!("eret from error, pc = {:016X}", cpu.state.get_pc());
             } else {
                 status.set_exl(false);
 
@@ -829,6 +839,8 @@ fn eret(instr: &Instruction, cpu: &mut R4300i) {
                     .get_reg::<crate::cop0::registers::Epc>(crate::cop0::Register::Epc);
 
                 cpu.state.set_pc(sign_extend_word(epc.epc()));
+
+                println!("eret from non-error, pc = {:016X}", cpu.state.get_pc());
             }
 
             cpu.cop0
@@ -1168,6 +1180,37 @@ fn lb(instr: &Instruction, cpu: &mut R4300i) {
     set_reg!(cpu, dec.source2(), val);
 }
 
+fn lwl(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Lwl(dec) = instr else {
+        unreachable!()
+    };
+
+    let base = get_reg!(cpu, dec.source1(), dword);
+    let offset = sign_extend_hword_twice(dec.imm());
+
+    let address = base.wrapping_add(offset) as word;
+    let aligned_address = address & !3;
+    let misalignment = address & 3;
+
+    if misalignment != 0 {
+        println!("l misaligned");
+    }
+
+    let mem = cpu
+        .read::<word>(aligned_address)
+        .unwrap_or(DEFAULT_READ_VALUE as _);
+
+    let reg = get_reg!(cpu, dec.source2(), word);
+
+    let val = if misalignment != 0 {
+        (mem << (misalignment * 8)) | (reg & !((1 << ((4 - misalignment) * 8)) - 1))
+    } else {
+        mem
+    };
+
+    set_reg!(cpu, dec.source2(), sign_extend_word(val));
+}
+
 fn lw(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Lw(dec) = instr else {
         unreachable!()
@@ -1211,6 +1254,37 @@ fn lhu(instr: &Instruction, cpu: &mut R4300i) {
     set_reg!(cpu, dec.source2(), val as _);
 }
 
+fn lwr(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Lwr(dec) = instr else {
+        unreachable!()
+    };
+
+    let base = get_reg!(cpu, dec.source1(), dword);
+    let offset = sign_extend_hword_twice(dec.imm());
+
+    let address = base.wrapping_add(offset) as word;
+    let aligned_address = address & !3;
+    let misalignment = address.wrapping_add(1) & 3;
+
+    if misalignment != 0 {
+        println!("r misaligned");
+    }
+
+    let mem = cpu
+        .read::<word>(aligned_address)
+        .unwrap_or(DEFAULT_READ_VALUE as _);
+
+    let reg = get_reg!(cpu, dec.source2(), word);
+
+    let val = if misalignment != 0 {
+        (mem >> ((4 - misalignment) * 8)) | (reg & !((1 << (misalignment * 8)) - 1))
+    } else {
+        return;
+    };
+
+    set_reg!(cpu, dec.source2(), sign_extend_word(val));
+}
+
 fn lwu(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Lwu(dec) = instr else {
         unreachable!()
@@ -1251,6 +1325,23 @@ fn sh(instr: &Instruction, cpu: &mut R4300i) {
         base.wrapping_add(offset) as _,
         get_reg!(cpu, dec.source2(), hword),
     );
+}
+
+fn swl(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Swl(dec) = instr else {
+        unreachable!()
+    };
+
+    let base = get_reg!(cpu, dec.source1(), dword);
+    let offset = sign_extend_hword_twice(dec.imm());
+
+    let address = base.wrapping_add(offset) as word;
+
+    let val = get_reg!(cpu, dec.source2(), word);
+
+    for i in 0..(4 - (address & 3)) {
+        cpu.write(address.wrapping_add(i), (val >> ((3 - i) * 8)) as byte);
+    }
 }
 
 fn sw(instr: &Instruction, cpu: &mut R4300i) {
@@ -1297,6 +1388,23 @@ fn sdr(instr: &Instruction, cpu: &mut R4300i) {
     let val = get_reg!(cpu, dec.source2(), dword);
 
     for i in 0..((address.wrapping_add(1)) & 7) {
+        cpu.write(address.wrapping_sub(i), (val >> (i * 8)) as byte);
+    }
+}
+
+fn swr(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Swr(dec) = instr else {
+        unreachable!()
+    };
+
+    let base = get_reg!(cpu, dec.source1(), dword);
+    let offset = sign_extend_hword_twice(dec.imm());
+
+    let address = base.wrapping_add(offset) as word;
+
+    let val = get_reg!(cpu, dec.source2(), word);
+
+    for i in 0..((address.wrapping_add(1)) & 3) {
         cpu.write(address.wrapping_sub(i), (val >> (i * 8)) as byte);
     }
 }

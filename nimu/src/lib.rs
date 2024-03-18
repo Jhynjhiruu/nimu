@@ -22,6 +22,15 @@ impl Nimu {
     }
 
     pub fn run(&mut self) {
+        self.cpu.write::<u32>(0x80300000, 0x8006B940);
+        self.cpu.write::<u32>(0x80300004, 0x00000000);
+        self.cpu.write::<u32>(0x80300008, 0xA006C934);
+        self.cpu.write::<u32>(0x8030000C, 0x24020030);
+        self.cpu.write::<u32>(0x80300010, 0x3C01A460);
+        self.cpu.write::<u32>(0x80300014, 0xAC220060);
+        self.cpu.write::<u32>(0x80300018, 0x1000FFFF);
+        self.cpu.write::<u32>(0x8030001C, 0x00000000);
+
         self.cpu.start();
         //self.cpu.start_logging();
         while !self.cpu.halted {
@@ -33,6 +42,27 @@ impl Nimu {
             /*if self.cpu.get_pc() as u32 == 0x9FC01F30 {
                 self.cpu.start_logging();
             }*/
+            if self.cpu.get_pc() as u32 == 0x9fc407c8 {
+                println!(
+                    "sk hash from v2: {:08X}{:08X}{:08X}{:08X}{:08X}",
+                    self.cpu.read::<u32>(0xBFCA0000).unwrap(),
+                    self.cpu.read::<u32>(0xBFCA0004).unwrap(),
+                    self.cpu.read::<u32>(0xBFCA0008).unwrap(),
+                    self.cpu.read::<u32>(0xBFCA000C).unwrap(),
+                    self.cpu.read::<u32>(0xBFCA0010).unwrap()
+                );
+
+                let sp = self.cpu.get_reg(29) as u32;
+
+                println!(
+                    "calculated: {:08X}{:08X}{:08X}{:08X}{:08X}",
+                    self.cpu.read::<u32>(sp + 0x90).unwrap(),
+                    self.cpu.read::<u32>(sp + 0x94).unwrap(),
+                    self.cpu.read::<u32>(sp + 0x98).unwrap(),
+                    self.cpu.read::<u32>(sp + 0x9C).unwrap(),
+                    self.cpu.read::<u32>(sp + 0xA0).unwrap()
+                );
+            }
             if self.cpu.get_pc() as u32 == 0x9fc032cc {
                 println!(
                     "rsa_verify_signature -> {:08X}",
@@ -98,6 +128,14 @@ impl Nimu {
                 self.cpu.halt();
             }
             if self.cpu.get_pc() as u32 == 0xBFC00A7C {
+                println!(
+                    "ram at 0x80300000: {:08X} {:08X} {:08X} {:08X}",
+                    self.cpu.read::<u32>(0x80300000).unwrap(),
+                    self.cpu.read::<u32>(0x80300004).unwrap(),
+                    self.cpu.read::<u32>(0x80300008).unwrap(),
+                    self.cpu.read::<u32>(0x8030000C).unwrap()
+                );
+
                 let mut a0 = self.cpu.get_reg(4);
 
                 loop {
@@ -116,8 +154,8 @@ impl Nimu {
                 //self.cpu.start_logging();
                 println!("virage write {:016X}", self.cpu.get_reg(4));
             }
-            if self.cpu.get_pc() as u32 == 0x8000c76c {
-                self.cpu.start_logging()
+            if self.cpu.get_pc() as u32 == 0x9fc022a8 {
+                //self.cpu.start_logging()
             }
             if self.cpu.get_pc() as u32 == 0x8000F654 {
                 /*println!(
@@ -125,6 +163,21 @@ impl Nimu {
                     self.cpu.get_reg(0x10) as u32,
                     self.cpu.get_reg(0x1D) as u32
                 );*/
+            }
+            if self.cpu.get_pc() as u32 == 0x800051b0 {
+                //println!("osGetCount");
+            }
+            if self.cpu.get_pc() as u32 == 0x80005780 {
+                println!("osStopThread");
+            }
+            if self.cpu.get_pc() as u32 == 0x800074CC {
+                let thread_ptr = self.cpu.get_reg(26);
+                println!("__osDispatchThread: {:016X}", thread_ptr);
+
+                /*match thread_ptr as u32 {
+                    0x8001AF48 | 0x8002B2A8 | 0x8006B818 => self.cpu.stop_logging(),
+                    _ => self.cpu.start_logging(),
+                }*/
             }
             if self.cpu.get_pc() as u32 == 0x800074FC {
                 let k0 = self.cpu.get_reg(26) as u32;
@@ -136,6 +189,44 @@ impl Nimu {
                 }
 
                 write(format!("dump-{k0:08X}.bin"), dump).unwrap();
+            }
+            if self.cpu.get_pc() as u32 == 0x8000ad40 {
+                let mut a0 = self.cpu.get_reg(4);
+
+                loop {
+                    let c = self.cpu.read::<u8>(a0 as u32).unwrap_or(0);
+                    a0 += 1;
+                    if c == 0 {
+                        break;
+                    }
+                    print!("{}", c as char);
+                }
+            }
+            if self.cpu.get_pc() as u32 == 0x80002050 {
+                // patch sa1 to not check BBID
+                // it's incredibly annoying that this is needed, but i can't
+                // quite figure out interrupts properly without a rewrite
+                self.cpu.write::<u32>(0x80002100, 0x00000000);
+
+                // patch sa1 to not wait for the interrupt reading sa2 to complete
+                self.cpu.write::<u32>(0x800083ac, 0x00000000);
+            }
+            if self.cpu.get_pc() as u32 == 0x80004f8c {
+                if self.cpu.get_reg(3) as u32 == 0xA006B954 {
+                    println!(
+                        "ram at the place:\n{:08X} {:08X} {:08X} {:08X}\n{:08X} {:08X} {:08X} {:08X}",
+                        self.cpu.read::<u32>(0xA006B934).unwrap(),
+                        self.cpu.read::<u32>(0xA006B938).unwrap(),
+                        self.cpu.read::<u32>(0xA006B93C).unwrap(),
+                        self.cpu.read::<u32>(0xA006B940).unwrap(),
+                        self.cpu.read::<u32>(0xA006B944).unwrap(),
+                        self.cpu.read::<u32>(0xA006B948).unwrap(),
+                        self.cpu.read::<u32>(0xA006B94C).unwrap(),
+                        self.cpu.read::<u32>(0xA006B950).unwrap(),
+                    );
+                    //self.cpu.start_logging();
+                    //self.cpu.trigger_interrupt();
+                }
             }
         }
         self.cpu.stop();

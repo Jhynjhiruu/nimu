@@ -14,7 +14,7 @@ pub mod tlb;
 mod virage;
 
 use interfaces::ai::Ai;
-use interfaces::mi::Mi;
+use interfaces::mi::{Mi, Intr};
 use interfaces::pi::{Dma, Pi};
 use interfaces::si::Si;
 use interfaces::sp::Sp;
@@ -245,9 +245,9 @@ impl State {
         T: Cop0Register,
     {
         self.registers[reg as usize] = val.as_reg(reg).expect("illegal register write");
-        /*if !matches!(reg, Register::Random | Register::Count) {
+        if !matches!(reg, Register::Random | Register::Count) {
             println!("cop0 reg {reg:?} write: {val:?}");
-        }*/
+        }
     }
 
     pub fn get_coc(&self) -> bool {
@@ -316,8 +316,6 @@ pub struct Cop0 {
     si: Si,
     usb0: Usb,
     usb1: Usb,
-
-    flash_intr_timer: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +350,6 @@ impl Cop0 {
             si: Si::new(),
             usb0: Usb::new(0x04900000),
             usb1: Usb::new(0x04A00000),
-            flash_intr_timer: 0,
         }
     }
 
@@ -392,16 +389,93 @@ impl Cop0 {
         self.mi.set_secure_trap(trap);
     }
 
-    pub fn vi_frame(&mut self) -> bool {
-        let vi_intr = self.vi.frame(Box::as_ref(&self.ram));
-
-        self.mi.set_vi_intr(vi_intr);
-
-        vi_intr
+    pub fn trigger_md_intr(&mut self) {
+        self.mi.set_md_intr(true);
     }
 
-    pub fn trigger_md_intr(&mut self) {
-        self.mi.trigger_md_intr();
+    pub fn update_count(&mut self) {
+        let mut count: registers::Count = self.state.get_reg(Register::Count);
+        count.set_count(count.count().wrapping_add(1));
+        self.state.set_reg(Register::Count, count);
+    }
+
+    pub fn update_random(&mut self) {
+        let mut random: registers::Random = self.state.get_reg(Register::Random);
+        let wired: registers::Wired = self.state.get_reg(Register::Wired);
+
+        if random.random() <= wired.wired() {
+            random.set_random(31);
+        } else {
+            random.set_random(random.random() - 1);
+        }
+
+        self.state.set_reg(Register::Random, random);
+    }
+
+    pub fn update_cause(&mut self) {
+        let mut cause: registers::Cause = self.state.get_reg(Register::Cause);
+        let old_cause: registers::Cause = self.state.get_reg(Register::Cause);
+
+
+        let count: registers::Count = self.state.get_reg(Register::Count);
+        let compare: registers::Compare = self.state.get_reg(Register::Compare);
+
+        if self.mi.has_interrupt() {
+            cause.set_ip(cause.ip() | 0x04);
+        } else {
+            cause.set_ip(cause.ip() & !0x04);
+        }
+
+        if self.mi.has_extended_interrupt() {
+            cause.set_ip(cause.ip() | 0x08);
+        } else {
+            cause.set_ip(cause.ip() & !0x08);
+        }
+
+        if count.count() == compare.compare() {
+            cause.set_ip(cause.ip() | 0x80);
+        } else {
+            cause.set_ip(cause.ip() & !0x80);
+        }
+
+        if self.should_raise_interrupt() {
+            cause.set_exc(0);
+        }
+
+        if(old_cause != cause) {
+            self.state.set_reg(Register::Cause, cause);
+        }
+    }
+
+    pub fn step(&mut self) {
+        self.update_count();
+        self.update_random();
+        self.update_cause();
+
+        self.mi.step();
+
+        self.pi.step(Box::as_mut(&mut self.ram));
+        self.ai.step();
+        self.si.step();
+        self.sp.step();
+        self.vi.step();
+        self.usb0.step();
+        self.usb1.step();
+
+        self.mi.set_vi_intr(self.vi.has_interrupt());
+        self.mi.set_pi_intr(self.pi.has_dma_done_interrupt());
+        self.mi.set_flash_intr(self.pi.has_flash_interrupt());
+    }
+
+    pub fn should_raise_interrupt(&self) -> bool {
+        let cause: registers::Cause = self.state.get_reg(Register::Cause);
+        let status: registers::Status = self.state.get_reg(Register::Status);
+        
+        if cause.ip() & status.im() != 0 && status.ie() && !status.erl() && !status.exl() {
+            true
+        } else {
+            false
+        }
     }
 
     fn virt_to_phys(&mut self, address: word, write: bool) -> TLBResult<word> {
@@ -575,72 +649,6 @@ impl Cop0 {
         }
 
         TLBResult::Ok(())
-    }
-
-    pub fn dma(&mut self) -> bool {
-        let dma_queued = self.pi.dma_queued();
-
-        if dma_queued {
-            match self.pi.dma_params() {
-                Dma::Read(dram_addr, pi_addr, len) => {
-                    self.pi.bus_write(
-                        pi_addr,
-                        len,
-                        &self.ram[dram_addr as usize..(dram_addr + len) as usize],
-                    );
-                }
-                Dma::Write(dram_addr, pi_addr, len) => {
-                    self.ram[dram_addr as usize..(dram_addr + len) as usize]
-                        .copy_from_slice(&self.pi.bus_read(pi_addr, len));
-                }
-                Dma::BufRead(dram_addr, pi_addr, len) => {
-                    let len = len.min(0x400);
-                    self.pi.buf_write(
-                        pi_addr,
-                        len,
-                        &self.ram[dram_addr as usize..(dram_addr + len) as usize],
-                    );
-                }
-                Dma::BufWrite(dram_addr, pi_addr, len) => {
-                    let len = len.min(0x400);
-                    println!("dram_addr: {dram_addr:08X}, pi_addr: {pi_addr:08X}, len: {len:08X}");
-                    self.ram[dram_addr as usize..(dram_addr + len) as usize]
-                        .copy_from_slice(self.pi.buf_read(pi_addr, len));
-                }
-            }
-
-            self.pi.clear_dma();
-
-            self.mi.set_pi_intr()
-        } else {
-            false
-        }
-    }
-
-    pub fn card(&mut self) -> bool {
-        let flash_command = self.pi.flash_command();
-
-        if flash_command {
-            if self.flash_intr_timer == 0 {
-                self.flash_intr_timer = 60;
-            }
-
-            self.flash_intr_timer -= 1;
-
-            if self.flash_intr_timer == 0 {
-                self.pi.clear_flash_command();
-
-                self.mi.set_flash_intr()
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    pub fn module(&mut self) -> bool {
-        self.mi.md_intr()
     }
 
     fn read_phys_addr(&mut self, address: word) -> byte {

@@ -114,4 +114,8 @@ impl Ai {
             }
         }
     }
+
+    pub fn step(&self) {
+        
+    }
 }

@@ -179,7 +179,7 @@ pub struct Status {
 
 #[bitfield]
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, BitfieldSpecifier)]
+#[derive(Debug, Clone, Copy, BitfieldSpecifier, PartialEq, Eq)]
 pub struct Cause {
     #[skip]
     __: B2,

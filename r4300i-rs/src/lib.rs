@@ -552,10 +552,6 @@ impl R4300i {
         self.did_soft_reset = false;
         self.did_nmi = false;
 
-        let mut count: cop0::registers::Count = self.cop0.state.get_reg(cop0::Register::Count);
-        count.set_count(count.count().wrapping_add(2000000));
-        self.cop0.state.set_reg(cop0::Register::Count, count);
-
         if self.running && !self.halted {
             let coc0buf = self.cop0.state.get_coc();
             let coc1buf = false; // TODO cop1
@@ -568,49 +564,12 @@ impl R4300i {
 
             self.handle_exception();
 
-            let mut random: cop0::registers::Random =
-                self.cop0.state.get_reg(cop0::Register::Random);
-            let wired: cop0::registers::Wired = self.cop0.state.get_reg(cop0::Register::Wired);
-
-            if random.random() <= wired.wired() {
-                random.set_random(31);
-            } else {
-                random.set_random(random.random() - 1);
+            if self.cop0.should_raise_interrupt() {
+                println!("Interrupt!");
+                self.throw_exception(Exception::new(ExceptionType::Interrupt));
             }
 
-            self.cop0.state.set_reg(cop0::Register::Random, random);
-        }
-        let status: cop0::registers::Status = self.cop0.state.get_reg(cop0::Register::Status);
-
-        let count: cop0::registers::Count = self.cop0.state.get_reg(cop0::Register::Count);
-        let compare: cop0::registers::Compare = self.cop0.state.get_reg(cop0::Register::Compare);
-
-        let mut cause: cop0::registers::Cause = self.cop0.state.get_reg(cop0::Register::Cause);
-        if count.count() == compare.compare() {
-            cause.set_ip(cause.ip() | 0x80);
-        } else {
-            cause.set_ip(cause.ip() & !0x80);
-        }
-
-        let mut vi_intr = false;
-
-        self.video_timer += 1;
-        // not the right number
-        // all the vi timings are horribly awful
-        if self.video_timer == 600 {
-            vi_intr = self.cop0.vi_frame();
-            self.video_timer = 0;
-        }
-
-        if self.cop0.dma() || self.cop0.card() || vi_intr || self.cop0.module() {
-            cause.set_ip(cause.ip() | 0x04);
-        } else {
-            cause.set_ip(cause.ip() & !0x04);
-        }
-        self.cop0.state.set_reg(cop0::Register::Cause, cause);
-
-        if cause.ip() & status.im() != 0 {
-            self.throw_exception(Exception::new(ExceptionType::Interrupt));
+            self.cop0.step();
         }
 
         if self.logging {
@@ -764,12 +723,6 @@ impl R4300i {
         }
 
         println!("Exception: {:?}", self.exception.exception);
-
-        if self.exception.exception < ExceptionType::ColdReset {
-            let mut cause: cop0::registers::Cause = self.cop0.state.get_reg(cop0::Register::Cause);
-            cause.set_exc(self.exception.exception as _);
-            self.cop0.state.set_reg(cop0::Register::Cause, cause);
-        }
 
         let mut status: cop0::registers::Status = self.cop0.state.get_reg(cop0::Register::Status);
 

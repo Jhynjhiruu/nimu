@@ -32,9 +32,11 @@ impl Nimu {
         self.cpu.write::<u32>(0x8030001C, 0x00000000);
 
         self.cpu.start();
+
         //self.cpu.start_logging();
         while !self.cpu.halted {
             self.cpu.step();
+
             if self.cpu.get_pc() as u32 == 0x9fc00000 && !self.cpu.get_mi_mapping() {
                 write("kernel.bin", self.cpu.get_bootram()).unwrap();
                 //self.cpu.start_logging();
@@ -202,14 +204,29 @@ impl Nimu {
                     print!("{}", c as char);
                 }
             }
+
+            if self.cpu.get_pc() as u32 == 0x80008924 {
+                println!("__osBbIsBb: {}", self.cpu.read::<u32>(0x80000388).unwrap());
+                println!("__osBbCardWaitEvent(): called osRecvMesg");
+                // self.cpu.start_logging();
+            }
+
+            if self.cpu.get_pc() as u32 == 0x8000892C {
+                println!("__osBbCardWaitEvent(): osRecvMesg returned");
+            }
+
+            if self.cpu.get_pc() as u32 == 0x8000672C {
+                println!("t0 in exceptasm: {:08x}", self.cpu.get_reg(9) as u32);
+            }
+
             if self.cpu.get_pc() as u32 == 0x80002050 {
                 // patch sa1 to not check BBID
                 // it's incredibly annoying that this is needed, but i can't
                 // quite figure out interrupts properly without a rewrite
-                self.cpu.write::<u32>(0x80002100, 0x00000000);
+                // self.cpu.write::<u32>(0x80002100, 0x00000000);
 
                 // patch sa1 to not wait for the interrupt reading sa2 to complete
-                self.cpu.write::<u32>(0x800083ac, 0x00000000);
+                // self.cpu.write::<u32>(0x800083ac, 0x00000000);
             }
             if self.cpu.get_pc() as u32 == 0x80004f8c {
                 if self.cpu.get_reg(3) as u32 == 0xA006B954 {

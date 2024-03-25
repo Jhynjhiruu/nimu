@@ -159,6 +159,9 @@ pub struct Vi {
     y_scale: Scale,
     span_addr: SpanAddr,
     span_data: SpanData,
+
+    raise_interrupt: bool,
+    scanline_clocks: u64,
 }
 
 impl Vi {
@@ -180,20 +183,9 @@ impl Vi {
             y_scale: Scale::new(),
             span_addr: SpanAddr::new(),
             span_data: SpanData::new(),
-        }
-    }
 
-    pub fn frame<const N: usize>(&mut self, ram: &[byte; N]) -> bool {
-        self.current
-            .set_half_line((self.current.half_line() + 1) & 0x3FF);
-
-        if self.current.half_line() == self.intr.half_line() {
-            match self.control.bit_depth() {
-                BitDepth::None => false,
-                BitDepth::Bits16 | BitDepth::Bits32 => true,
-            }
-        } else {
-            false
+            raise_interrupt: false,
+            scanline_clocks: 0,
         }
     }
 
@@ -261,8 +253,8 @@ impl Vi {
             }
 
             0x04400010..=0x04400013 => {
-                self.current = merge_byte(self.current.into(), address, val).into();
-                println!("vi current: {:08X}", self.current.half_line());
+                self.raise_interrupt = false;
+                println!("clearing vi interrupt!");
             }
 
             0x04400014..=0x04400017 => {
@@ -324,6 +316,27 @@ impl Vi {
                 eprintln!("unimplemented VI write: {address:08X} {val:02X}");
                 unimplemented!()
             }
+        }
+    }
+
+    pub fn has_interrupt(&self) -> bool {
+        self.raise_interrupt
+    }
+
+    pub fn step(&mut self) {
+        let current: u32 = self.current.half_line().into();
+        let intr: u32 = self.intr.half_line().into();
+
+        if current == intr {
+            self.raise_interrupt = true;
+        }
+
+        self.scanline_clocks = self.scanline_clocks + 1;
+        let quarter_pixels_displayed: u64 = (((self.scanline_clocks as f64) / 13.6) as u64);
+
+        if quarter_pixels_displayed == self.h_sync.line_duration().into() {
+            self.current.set_half_line((self.current.half_line() + 1) & 0x3FF);
+            self.scanline_clocks = 0;
         }
     }
 }

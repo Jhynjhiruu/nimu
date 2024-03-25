@@ -70,4 +70,8 @@ impl Si {
             }
         }
     }
+
+    pub fn step(&self) {
+        
+    }
 }

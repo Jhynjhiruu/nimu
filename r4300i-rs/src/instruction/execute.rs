@@ -708,19 +708,6 @@ fn mfc0(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    /*delay_slot!(
-        cpu,
-        |instr: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
-            let Instruction::Mfc0(dec) = instr else {
-                unreachable!()
-            };
-            
-            set_reg!(cpu, dec.source(), sign_extend_word(delay_slot_target as _));
-            advance_pc!(cpu);
-        },
-        get_cop0_reg!(cpu, dec.dest(), _),
-        true
-    )*/
     set_reg!(
         cpu,
         dec.source(),
@@ -734,19 +721,6 @@ fn mtc0(instr: &Instruction, cpu: &mut R4300i) {
         unreachable!()
     };
 
-    /*delay_slot!(
-        cpu,
-        |instr: &Instruction, cpu: &mut R4300i, delay_slot_target: dword, _: bool| {
-            let Instruction::Mtc0(dec) = instr else {
-                unreachable!()
-            };
-
-            set_cop0_reg!(cpu, dec.dest(), delay_slot_target as _);
-            advance_pc!(cpu);
-        },
-        get_reg!(cpu, dec.source(), dword),
-        true
-    )*/
     set_cop0_reg!(cpu, dec.dest(), get_reg!(cpu, dec.source(), _));
 }
 

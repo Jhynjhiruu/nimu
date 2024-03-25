@@ -95,4 +95,8 @@ impl Usb {
             }
         }
     }
+
+    pub fn step(&self) {
+        
+    }
 }

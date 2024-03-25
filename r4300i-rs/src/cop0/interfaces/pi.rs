@@ -25,11 +25,22 @@ pub struct TransferLen {
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
 pub struct Status {
+    dma_busy: bool,
+    io_busy: bool,
+    dma_error: bool,
+    dma_complete: bool,
+    #[skip]
+    __: B28,
+}
+
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub struct StatusWrite {
     reset: bool,
     clear: bool,
-    error: bool,
     #[skip]
-    __: B29,
+    __: B30,
 }
 
 #[bitfield]
@@ -203,6 +214,7 @@ pub struct Pi {
 
     status: Status,
     dma_busy: bool,
+    dma_done_interrupt: bool,
     io_busy: bool,
     error: bool,
 
@@ -221,7 +233,8 @@ pub struct Pi {
     flash_ctrl: FlashCtrl,
     flash_double_error: bool,
     flash_single_error: bool,
-    flash_interrupt: bool,
+    raise_flash_interrupt: bool,
+    flash_intr_timer: usize,
     flash_busy: bool,
 
     flash_config: FlashConfig,
@@ -274,6 +287,7 @@ impl Pi {
 
             status: Status::new(),
             dma_busy: false,
+            dma_done_interrupt: false,
             io_busy: false,
             error: false,
 
@@ -292,7 +306,8 @@ impl Pi {
             flash_ctrl: FlashCtrl::new(),
             flash_double_error: false,
             flash_single_error: false,
-            flash_interrupt: false,
+            raise_flash_interrupt: false,
+            flash_intr_timer: 0,
             flash_busy: false,
 
             flash_config: FlashConfig::new(),
@@ -359,11 +374,11 @@ impl Pi {
         self.buffer_write_len.set_len(0);
     }
 
-    pub fn flash_command(&self) -> bool {
+    pub fn flash_running(&self) -> bool {
         self.flash_ctrl.run()
     }
 
-    pub fn clear_flash_command(&mut self) {
+    pub fn set_flash_done(&mut self) {
         self.flash_ctrl.set_run(false);
     }
 
@@ -420,19 +435,19 @@ impl Pi {
     pub fn bus_write(&mut self, address: word, length: word, data: &[byte]) {
         match address {
             0x00000000..=0x04FFFFFF => match address {
-                _ => unimplemented!("pi bus domain 1 read {address:08X}"),
+                _ => unimplemented!("pi bus domain 1 write {address:08X}"),
             },
             0x05000000..=0x05FFFFFF => match address {
-                _ => unimplemented!("pi bus domain 2 read {address:08X}"),
+                _ => unimplemented!("pi bus domain 2 write {address:08X}"),
             },
             0x06000000..=0x07FFFFFF => match address {
-                _ => unimplemented!("pi bus domain 1 read {address:08X}"),
+                _ => unimplemented!("pi bus domain 1 write {address:08X}"),
             },
             0x08000000..=0x0FFFFFFF => match address {
-                _ => unimplemented!("pi bus domain 2 read {address:08X}"),
+                _ => unimplemented!("pi bus domain 2 write {address:08X}"),
             },
             0x10000000..=0xFFFFFFFF => match address {
-                _ => unimplemented!("pi bus domain 1 read {address:08X}"),
+                _ => unimplemented!("pi bus domain 1 write {address:08X}"),
             },
         }
     }
@@ -449,7 +464,7 @@ impl Pi {
             0x00..=0x3FF => {
                 self.buf[address as usize..(address + length) as usize].copy_from_slice(data)
             }
-            _ => unimplemented!("pi bus domain 1 read {address:08X}"),
+            _ => unimplemented!("pi bus domain 1 write {address:08X}"),
         }
     }
 
@@ -465,9 +480,9 @@ impl Pi {
 
             0x04600010..=0x04600013 => retrieve_byte(
                 self.status
-                    .with_reset(self.dma_busy)
-                    .with_clear(self.io_busy)
-                    .with_error(self.error)
+                    .with_dma_busy(self.dma_busy)
+                    .with_io_busy(self.io_busy)
+                    .with_dma_error(self.error)
                     .into(),
                 address,
             ),
@@ -497,7 +512,7 @@ impl Pi {
                 self.flash_ctrl
                     .with_multi_cycle(self.flash_double_error)
                     .with_ecc(self.flash_single_error)
-                    .with_interrupt(self.flash_interrupt)
+                    .with_interrupt(self.raise_flash_interrupt)
                     .with_run(self.flash_busy)
                     .into(),
                 address,
@@ -586,8 +601,17 @@ impl Pi {
             }
 
             0x04600010..=0x04600013 => {
-                self.status = merge_byte(self.status.into(), address, val).into();
-                self.status.set_error(false);
+                // self.status = merge_byte(self.status.into(), address, val).into();
+                
+                let status: StatusWrite = merge_byte(0, address, val).into();
+                if status.reset() {
+                    self.dma_busy = false;
+                    self.status.set_dma_error(false);
+                }
+
+                if status.clear() {
+                    self.dma_done_interrupt = false;
+                }
             }
 
             0x04600014..=0x04600017 => {
@@ -630,9 +654,12 @@ impl Pi {
 
             0x04600048..=0x0460004B => {
                 self.flash_ctrl = merge_byte(self.flash_ctrl.into(), address, val).into();
+
                 if (address & 3) == 3 {
                     //println!("{:#X?}\n{:08X}", self.flash_ctrl, self.flash_addr.addr());
                     if self.flash_ctrl.run() {
+                        println!("Processing flash command: {:08x}", self.flash_ctrl.command());
+
                         match self.flash_ctrl.command() {
                             0x00 => {
                                 //self.flash_busy = true;
@@ -660,6 +687,11 @@ impl Pi {
                                 )
                             }
                         }
+                    }
+
+                    let regval: u32 = self.flash_ctrl.into();
+                    if val == 0 {
+                        self.raise_flash_interrupt = false;
                     }
                 }
             }
@@ -805,5 +837,70 @@ impl Pi {
         let dec = aes_dec_cbc(enc, key, &iv, None).expect("decryption failed");
 
         dec[(address & 0x3FFF) as usize]
+    }
+
+    pub fn step_dma<const N: usize>(&mut self, ram: &mut [byte; N]) {
+        if self.dma_queued() {
+            match self.dma_params() {
+                Dma::Read(dram_addr, pi_addr, len) => {
+                    self.bus_write(
+                        pi_addr,
+                        len,
+                        &ram[dram_addr as usize..(dram_addr + len) as usize],
+                    );
+                }
+                Dma::Write(dram_addr, pi_addr, len) => {
+                    ram[dram_addr as usize..(dram_addr + len) as usize]
+                        .copy_from_slice(&self.bus_read(pi_addr, len));
+                }
+                Dma::BufRead(dram_addr, pi_addr, len) => {
+                    let len = len.min(0x400);
+                    self.buf_write(
+                        pi_addr,
+                        len,
+                        &ram[dram_addr as usize..(dram_addr + len) as usize],
+                    );
+                }
+                Dma::BufWrite(dram_addr, pi_addr, len) => {
+                    let len = len.min(0x400);
+                    println!("dram_addr: {dram_addr:08X}, pi_addr: {pi_addr:08X}, len: {len:08X}");
+                    ram[dram_addr as usize..(dram_addr + len) as usize]
+                        .copy_from_slice(&self.buf_read(pi_addr, len));
+                }
+            }
+
+            self.clear_dma();
+            self.dma_done_interrupt = true;
+        }
+    }
+
+    pub fn has_dma_done_interrupt(&self) -> bool {
+        self.dma_done_interrupt
+    }
+
+    pub fn step_card(&mut self) {
+        let flash_command = self.flash_running();
+
+        if flash_command {
+            if self.flash_intr_timer == 0 {
+                self.flash_intr_timer = 60;
+            }
+
+            self.flash_intr_timer -= 1;
+
+            if self.flash_intr_timer == 0 {
+                self.set_flash_done();
+                self.raise_flash_interrupt = self.flash_ctrl.interrupt();
+            }
+        }
+    }
+
+    pub fn has_flash_interrupt(&self) -> bool {
+        return self.raise_flash_interrupt
+    }
+
+    pub fn step<const N: usize>(&mut self, ram: &mut [byte; N]) {
+        self.step_dma(ram);
+        self.step_card();
     }
 }

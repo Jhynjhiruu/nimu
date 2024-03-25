@@ -198,7 +198,6 @@ pub struct Mi {
     ebus_test_mode: bool,
 
     intr: Intr,
-
     intr_mask: IntrMask,
 
     ctrl: Ctrl,
@@ -217,6 +216,9 @@ pub struct Mi {
 
     eintr: EIntr,
     eintr_mask: EIntrMask,
+
+    raise_interrupt: bool,
+    raise_extended_interrupt: bool,
 }
 
 impl Mi {
@@ -237,6 +239,8 @@ impl Mi {
             av_control: AVCtrl::new(),
             eintr: EIntr::new(),
             eintr_mask: EIntrMask::new(),
+            raise_interrupt: false,
+            raise_extended_interrupt: false,
         }
     }
 
@@ -248,38 +252,27 @@ impl Mi {
         self.sec_mode.secure_exit()
     }
 
-    pub fn set_flash_intr(&mut self) -> bool {
-        /*println!(
-            "set_flash_intr: {:#?}, {:#?}",
-            self.intr_mask, self.eintr_mask
-        );*/
-
-        if self.intr_mask.pi() && self.eintr_mask.pi_flash() {
-            self.eintr.set_pi_flash(true);
-            true
-        } else {
-            false
-        }
+    pub fn set_flash_intr(&mut self, state: bool) {
+        self.eintr.set_pi_flash(state);
     }
 
-    pub fn set_pi_intr(&mut self) -> bool {
-        if self.intr_mask.pi() {
-            self.intr.set_pi(true);
-            true
-        } else {
-            false
-        }
+    pub fn get_flash_intr(&self) -> bool {
+        self.eintr.pi_flash()
     }
 
-    pub fn set_vi_intr(&mut self, enable: bool) {
-        self.intr.set_vi(enable);
+    pub fn set_vi_intr(&mut self, state: bool) {
+        self.intr.set_vi(state);
     }
 
-    pub fn trigger_md_intr(&mut self) {
-        self.eintr.set_module(true);
+    pub fn set_pi_intr(&mut self, state: bool) {
+        self.intr.set_pi(state);
     }
 
-    pub fn md_intr(&self) -> bool {
+    pub fn set_md_intr(&mut self, state: bool) {
+        self.eintr.set_module(state);
+    }
+
+    pub fn get_md_intr(&mut self) -> bool {
         self.eintr.module()
     }
 
@@ -293,6 +286,22 @@ impl Mi {
         }
 
         self.sec_mode.set_secure_exit(true);
+    }
+
+    pub fn has_interrupt(&self) -> bool {
+        self.raise_interrupt
+    }
+
+    pub fn has_extended_interrupt(&self) -> bool {
+        self.raise_extended_interrupt
+    }
+
+    pub fn get_intr(&self) -> u32 {
+        self.intr.into()
+    }
+
+    pub fn get_eintr(&self) -> u32 {
+        self.eintr.into()
     }
 
     pub fn read_phys_addr(&mut self, address: word) -> byte {
@@ -410,6 +419,14 @@ impl Mi {
                 if intr_mask_write.set_dp() {
                     self.intr_mask.set_dp(true);
                 }
+
+                if address & 3 == 3 {
+                    println!(
+                        "write intr_mask: {:#?}, {:08X}",
+                        self.intr_mask,
+                        u32::from_le_bytes(self.intr_mask.bytes)
+                    );
+                }
             }
 
             0x04300010..=0x04300013 => {
@@ -507,5 +524,16 @@ impl Mi {
                 unimplemented!()
             }
         }
+    }
+
+    pub fn step(&mut self) {
+        let intr: u32 = self.intr.into();
+        let mask: u32 = self.intr_mask.into();
+
+        let eintr: u32 = self.eintr.into();
+        let emask: u32 = self.eintr_mask.into();
+
+        self.raise_interrupt = ((intr & mask) != 0);
+        self.raise_extended_interrupt = ((eintr & emask) != 0);
     }
 }

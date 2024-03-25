@@ -377,8 +377,12 @@ impl Cop0 {
         self.pi.retrieve_spare()
     }
 
-    pub fn get_bootram(&self) -> &[u8] {
+    pub fn get_bootram(&self) -> &[byte] {
         self.virage.get_bootram()
+    }
+
+    pub fn get_ram(&self) -> &[byte] {
+        self.ram.as_ref()
     }
 
     pub fn get_mi_mapping(&self) -> bool {

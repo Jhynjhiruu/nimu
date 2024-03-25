@@ -1,3 +1,5 @@
+use std::fs::write;
+
 use crate::types::*;
 
 use modular_bitfield::prelude::*;
@@ -192,6 +194,7 @@ impl Virage2 {
                 self.cp.set_cmd(0);
             }
             self.data = self.sram;
+            write("v2-modified.bin", self.data).unwrap();
             self.ctrl.with_ready(false).with_pass(true).into()
         } else if self.command == 3 {
             if reset {
@@ -221,6 +224,7 @@ impl Virage2 {
                 self.cp.set_cmd(0);
             }
             self.data = self.sram;
+            write("v2-modified.bin", self.data).unwrap();
             self.nms.with_ready(false).into()
         } else if self.command == 3 {
             if reset {
@@ -250,6 +254,7 @@ impl Virage2 {
                 self.cp.set_cmd(0);
             }
             self.data = self.sram;
+            write("v2-modified.bin", self.data).unwrap();
             self.cp.with_ready(false).into()
         } else if self.command == 3 {
             if reset {

@@ -573,7 +573,7 @@ impl R4300i {
         }
 
         if self.logging {
-            //println!("{:016X?}", self.state.registers);
+            println!("{:016X?}", self.state.registers);
             /*println!(
                 "{:08X}",
                 self.cop0
@@ -836,8 +836,16 @@ impl R4300i {
         self.state.get_pc()
     }
 
+    pub fn set_pc(&mut self, pc: dword) {
+        self.state.set_pc(pc);
+    }
+
     pub fn get_bootram(&self) -> &[byte] {
         self.cop0.get_bootram()
+    }
+
+    pub fn get_ram(&self) -> &[byte] {
+        self.cop0.get_ram()
     }
 
     pub fn get_mi_mapping(&self) -> bool {

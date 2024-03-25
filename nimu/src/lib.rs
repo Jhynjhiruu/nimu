@@ -7,6 +7,8 @@ pub struct Nimu {
     cpu: R4300i,
 }
 
+//const PAYLOAD: &[u8] = include_bytes!(r"C:\Users\Jay\Documents\bbbs\payload");
+
 impl Nimu {
     pub fn new(
         bootrom: Vec<u8>,
@@ -22,14 +24,18 @@ impl Nimu {
     }
 
     pub fn run(&mut self) {
-        self.cpu.write::<u32>(0x80300000, 0x8006B940);
+        /*self.cpu.write::<u32>(0x80300000, 0x8006B940);
         self.cpu.write::<u32>(0x80300004, 0x00000000);
         self.cpu.write::<u32>(0x80300008, 0xA006C934);
         self.cpu.write::<u32>(0x8030000C, 0x24020030);
         self.cpu.write::<u32>(0x80300010, 0x3C01A460);
         self.cpu.write::<u32>(0x80300014, 0xAC220060);
         self.cpu.write::<u32>(0x80300018, 0x1000FFFF);
-        self.cpu.write::<u32>(0x8030001C, 0x00000000);
+        self.cpu.write::<u32>(0x8030001C, 0x00000000);*/
+
+        /*for (index, i) in PAYLOAD.iter().enumerate() {
+            self.cpu.write(0x80300000 + index as u32, *i);
+        }*/
 
         self.cpu.start();
         //self.cpu.start_logging();
@@ -37,7 +43,13 @@ impl Nimu {
             self.cpu.step();
             if self.cpu.get_pc() as u32 == 0x9fc00000 && !self.cpu.get_mi_mapping() {
                 write("kernel.bin", self.cpu.get_bootram()).unwrap();
-                //self.cpu.start_logging();
+                self.cpu.start_logging();
+            }
+            if self.cpu.get_pc() as u32 == 0x9fc00ea8 && !self.cpu.get_mi_mapping() {
+                self.cpu.start_logging();
+            }
+            if self.cpu.get_pc() as u32 == 0x80002000 {
+                write("ram.bin", self.cpu.get_ram()).unwrap();
             }
             /*if self.cpu.get_pc() as u32 == 0x9FC01F30 {
                 self.cpu.start_logging();
@@ -63,13 +75,13 @@ impl Nimu {
                     self.cpu.read::<u32>(sp + 0xA0).unwrap()
                 );
             }
-            if self.cpu.get_pc() as u32 == 0x9fc032cc {
+            /*if self.cpu.get_pc() as u32 == 0x9fc032cc {
                 println!(
                     "rsa_verify_signature -> {:08X}",
                     self.cpu.get_reg(31) as u32
                 );
                 self.cpu.stop_logging();
-            }
+            }*/
             /*if self.cpu.get_pc() as u32 == 0x9fc03890 {
                 println!("param: {:016X}", self.cpu.get_reg(4));
             }
@@ -211,9 +223,9 @@ impl Nimu {
                 // patch sa1 to not wait for the interrupt reading sa2 to complete
                 self.cpu.write::<u32>(0x800083ac, 0x00000000);
             }
-            if self.cpu.get_pc() as u32 == 0x80004f8c {
-                if self.cpu.get_reg(3) as u32 == 0xA006B954 {
-                    println!(
+            /*if self.cpu.get_pc() as u32 == 0x80004f8c {
+                if self.cpu.get_reg(3) as u32 == 0xA0006068 {
+                    /*println!(
                         "ram at the place:\n{:08X} {:08X} {:08X} {:08X}\n{:08X} {:08X} {:08X} {:08X}",
                         self.cpu.read::<u32>(0xA006B934).unwrap(),
                         self.cpu.read::<u32>(0xA006B938).unwrap(),
@@ -223,11 +235,12 @@ impl Nimu {
                         self.cpu.read::<u32>(0xA006B948).unwrap(),
                         self.cpu.read::<u32>(0xA006B94C).unwrap(),
                         self.cpu.read::<u32>(0xA006B950).unwrap(),
-                    );
-                    //self.cpu.start_logging();
+                    );*/
+                    self.cpu.start_logging();
                     //self.cpu.trigger_interrupt();
+                    self.cpu.set_pc(0x80000000);
                 }
-            }
+            }*/
         }
         self.cpu.stop();
     }

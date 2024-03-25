@@ -60,7 +60,7 @@ pub fn get_instruction_function(instr: &Instruction) -> InstructionFunction {
         Instruction::Tgeu(_) => todo!(),
         Instruction::Tlt(_) => todo!(),
         Instruction::Tltu(_) => todo!(),
-        Instruction::Teq(_) => todo!(),
+        Instruction::Teq(_) => teq,
         Instruction::Tne(_) => todo!(),
         Instruction::Dsll(_) => dsll,
         Instruction::Dsrl(_) => todo!(),
@@ -602,6 +602,19 @@ fn dsubu(instr: &Instruction, cpu: &mut R4300i) {
     set_reg!(cpu, dec.dest(), result);
 }
 
+fn teq(instr: &Instruction, cpu: &mut R4300i) {
+    let Instruction::Teq(dec) = instr else {
+        unreachable!()
+    };
+
+    let source1 = get_reg!(cpu, dec.source1(), dword);
+    let source2 = get_reg!(cpu, dec.source2(), dword);
+
+    if source1 == source2 {
+        cpu.throw_exception(Exception::new(ExceptionType::Trap));
+    }
+}
+
 fn dsll(instr: &Instruction, cpu: &mut R4300i) {
     let Instruction::Dsll(dec) = instr else {
         unreachable!()
@@ -714,7 +727,7 @@ fn mfc0(instr: &Instruction, cpu: &mut R4300i) {
             let Instruction::Mfc0(dec) = instr else {
                 unreachable!()
             };
-            
+
             set_reg!(cpu, dec.source(), sign_extend_word(delay_slot_target as _));
             advance_pc!(cpu);
         },

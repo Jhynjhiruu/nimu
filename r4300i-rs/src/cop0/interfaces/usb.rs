@@ -223,9 +223,9 @@ pub struct USBADDR {
 #[repr(u32)]
 pub struct BDTPAGE1 {
     reserved0: B1,
-    BDTBA: B6,
+    bdtba: B7,
     #[skip]
-    __: B25,
+    __: B24,
 }
 
 // Frame Number Low
@@ -260,11 +260,11 @@ pub struct TOKEN {
     __: B24,
 }
 
-// SOF Threshold Low
+// SOF Threshold
 #[bitfield]
 #[derive(Debug, Clone, Copy)]
 #[repr(u32)]
-pub struct SOFTHLDL {
+pub struct SOFTHLD {
     cnt: byte,
     #[skip]
     __: B24,
@@ -286,17 +286,6 @@ pub struct BDTPAGE2 {
 #[repr(u32)]
 pub struct BDTPAGE3 {
     bdtba: byte,
-    #[skip]
-    __: B24,
-}
-
-// SOF Threshold High
-#[bitfield]
-#[derive(Debug, Clone, Copy)]
-#[repr(u32)]
-pub struct SOFTHLDH {
-    cnt: B6,
-    reserved6: B2,
     #[skip]
     __: B24,
 }
@@ -328,7 +317,7 @@ pub struct ACCESS {
     __: B31,
 }
 
-// Binary Descriptor
+// Buffer Descriptor
 #[bitfield]
 #[derive(Debug, Clone, Copy)]
 #[repr(u32)]
@@ -340,8 +329,10 @@ pub struct BD {
     keep: bool,
     data01: bool,
     own: bool,
+    reserved8: B8,
+    bc: B10,
     #[skip]
-    __: B24,
+    __: B6,
 }
 
 #[bitfield]
@@ -374,6 +365,33 @@ pub struct SecMode {
     __: B31,
 }
 
+// BDT Address
+#[bitfield]
+#[repr(u32)]
+#[derive(Debug, Clone, Copy)]
+pub struct BDTADDRESS {
+    #[skip]
+    __: B3,
+    odd: bool,
+    tx: bool,
+    endpoint: B4,
+    page1: B7,
+    page2: B8,
+    page3: B8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BDINFO {
+    is_odd: bool,
+    token: u8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StatusFifoEntry {
+    entry: USBSTAT,
+    is_valid: bool,
+}
+
 #[derive(Debug)]
 pub struct Usb {
     base_address: word,
@@ -390,17 +408,15 @@ pub struct Usb {
     usbinten: USBINTEN,
     usberrstat: USBERRSTAT,
     usberren: USBERREN,
-    usbstat: USBSTAT,
     usbctl: USBCTL,
     usbaddr: USBADDR,
     bdtpage1: BDTPAGE1,
     frmnuml: FRMNUML,
     frmnumh: FRMNUMH,
     token: TOKEN,
-    softhldl: SOFTHLDL,
+    softhld: SOFTHLD,
     bdtpage2: BDTPAGE2,
     bdtpage3: BDTPAGE3,
-    softhldh: SOFTHLDH,
     endpt: [ENDPT; Self::NUM_ENDPTS],
     access: ACCESS,
     clock_sel: ClockSel,
@@ -408,10 +424,21 @@ pub struct Usb {
 
     sram: [u8; Self::SRAM_SIZE],
 
-    msec_timer: u32,
-    id_state: bool,
+    byte_time_counter: u32,
     sof_count: u32,
+    id_state: bool,
     wait_for_sof: bool,
+    token_processing: bool,
+    transaction_state: u32,
+
+
+    bdinfo: [BDINFO; Self::NUM_ENDPTS],
+
+    transfer_timer: u32,
+    transfer_state: u32,
+
+    status_fifo: [StatusFifoEntry; Self::STATUS_FIFO_SIZE],
+
 }
 
 impl Usb {
@@ -424,7 +451,14 @@ impl Usb {
 
     const NUM_TICKS_BYTE_TIME: u32 = 11; 
 
-    const SOF_COUNTER_INITIAL_COUNT: 32 = 12000;
+    const SOF_COUNTER_INITIAL_COUNT: u32 = 12000;
+
+    const OUT_TOKEN:   u8 = 0x1;
+    const IN_TOKEN:    u8 = 0x9;
+    const SOF_TOKEN:   u8 = 0x5;
+    const SETUP_TOKEN: u8 = 0xB;
+
+    const STATUS_FIFO_SIZE: usize = 4;
 
     pub fn new(base_address: word) -> Self {
         Self {
@@ -435,25 +469,23 @@ impl Usb {
             idcomp: IdComp::new().with_id(!4),
             revision: Rev::new(),
             addinfo: AddInfo::new(), 
-            otgistat: OTGISTAT::new().with_linestatestable(true), 
+            otgistat: OTGISTAT::new(), 
             otgicr: OTGICR::new(),
-            otgstat: OTGSTAT::new(),
+            otgstat: OTGSTAT::new().with_linestatestable(true),
             otgctl: OTGCTL::new(),
             usbistat: USBISTAT::new(),
             usbinten: USBINTEN::new(),
             usberrstat: USBERRSTAT::new(),
             usberren: USBERREN::new(),
-            usbstat: USBSTAT::new(),
             usbctl: USBCTL::new(),
             usbaddr: USBADDR::new(),
             bdtpage1: BDTPAGE1::new(),
             frmnuml: FRMNUML::new(),
             frmnumh: FRMNUMH::new(),
             token: TOKEN::new(),
-            softhldl: SOFTHLDL::new(),
+            softhld: SOFTHLD::new(),
             bdtpage2: BDTPAGE2::new(),
             bdtpage3: BDTPAGE3::new(),
-            softhldh: SOFTHLDH::new(),
             endpt: [0.into(); Self::NUM_ENDPTS],
             access: ACCESS::new(),
 
@@ -463,6 +495,12 @@ impl Usb {
             sof_count: Self::SOF_COUNTER_INITIAL_COUNT,
             id_state: true,
             wait_for_sof: true,
+            token_processing: false,
+            transaction_state: 0,
+            bdinfo: [BDINFO {is_odd: false, token: 0}; Self::NUM_ENDPTS],
+            transfer_timer: 0,
+            transfer_state: 0,
+            status_fifo: [StatusFifoEntry {entry: USBSTAT::new(), is_valid: false}; Self::STATUS_FIFO_SIZE],
         }
     }
 
@@ -503,7 +541,7 @@ impl Usb {
 
             0x008C..=0x008F => retrieve_byte(self.usberren.into(), address),
 
-            0x0090..=0x0093 => retrieve_byte(self.usbstat.into(), address),
+            0x0090..=0x0093 => retrieve_byte(self.status_fifo[0].entry.into(), address),
 
             0x0094..=0x0097 => retrieve_byte(self.usbctl.into(), address),
 
@@ -517,15 +555,13 @@ impl Usb {
 
             0x00A8..=0x00AB => retrieve_byte(self.token.into(), address),
 
-            0x00AC..=0x00AF => retrieve_byte(self.softhldl.into(), address),
+            0x00AC..=0x00AF => retrieve_byte(self.softhld.into(), address),
 
             0x00B0..=0x00B3 => retrieve_byte(self.bdtpage2.into(), address),
 
             0x00B4..=0x00B7 => retrieve_byte(self.bdtpage3.into(), address),
 
-            0x00B8..=0x00BB => retrieve_byte(self.softhldh.into(), address),
-
-            0x00BC..=0x00BF => {
+            0x00B8..=0x00BF => {
                 println!("ignored USB reg read @ {address:08X}");
                 0
             }
@@ -735,13 +771,16 @@ impl Usb {
             }
 
             0x00A8..=0x00AB => {
-                self.token = merge_byte(self.token.into(), address, val).into()
+                self.token = merge_byte(self.token.into(), address, val).into();
+                if (address & 3) == 3 {
+                    self.token_processing = true;
+                }
             }
             
             0x00AC..=0x00AF => {
-                self.softhldl = merge_byte(self.softhldl.into(), address, val).into()
+                self.softhld = merge_byte(self.softhld.into(), address, val).into()
             }
-            
+
             0x00B0..=0x00B3 => {
                 self.bdtpage2 = merge_byte(self.bdtpage2.into(), address, val).into()
             }
@@ -750,11 +789,7 @@ impl Usb {
                 self.bdtpage3 = merge_byte(self.bdtpage3.into(), address, val).into()
             }
 
-            0x00B8..=0x00BB => {
-                self.softhldh = merge_byte(self.softhldh.into(), address, val).into()
-            }
-
-            0x00BC..=0x00BF => {
+            0x00B8..=0x00BF => {
                 println!("ignored USB reg write @ {address:08X}: {val:02X}")
             }
 
@@ -841,41 +876,138 @@ impl Usb {
         }
     }
 
-    pub fn attach(&self, is_host: bool) {
-        if self.otgicr.iden() && is_host {
-            self.otgistat.set_idchg(true);
-        }
-
-        self.addinfo.set_iehost(is_host);
+    pub fn get_framenum(&self) -> u32 {
+        return self.frmnuml.frm() as u32 | ((self.frmnumh.frm() as u32) << 8);
     }
 
-    pub fn detach(&self, is_host: bool) {
-        if self.otgicr.iden() && is_host {
-            self.otgistat.set_idchg(true);
-        }
+    pub fn transmit_sof(&self) {
+        let framenum: u32 = self.get_framenum();
+        let data: [u8;3] = [Self::SOF_TOKEN | (!Self::SOF_TOKEN << 4), (framenum>>3) as u8, ((framenum & 7) << 5) as u8];
 
-        self.addinfo.set_iehost(false);
+        self.start_transmit(&data);
     }
 
-    pub fn handle_sof(&self) {
-        if self.usbctl.hostmodeen() {
-            if self.sof_count == 0 {
-                // TODO: handle transmit properly
-                self.transmit();
-                self.sof_count = SOF_COUNTER_INITIAL_COUNT;
+    pub fn start_transmit(&self, data: &[u8]) {
+        for i in 0..data.len() {
+            let byte = data[i];
+            println!("USB transmit: {byte:02x}");
+        }
+    }
+
+    pub fn status_fifo_push(&mut self, status: USBSTAT) {
+        for i in 0..self.status_fifo.len()-1 {
+            if !self.status_fifo[i].is_valid {
+                self.status_fifo[i].entry = status;
+                self.status_fifo[i].is_valid = true;
+                return;
+            }
+        }
+
+        for i in 0..self.status_fifo.len()-2 {
+            self.status_fifo[i] = self.status_fifo[i+1];
+        }
+
+        self.status_fifo[3].entry = status;
+        self.status_fifo[3].is_valid = true;
+    }
+
+    pub fn status_fifo_pop(&mut self) {
+        for i in 0..self.status_fifo.len()-2 {
+            self.status_fifo[i] = self.status_fifo[i+1];
+        }
+
+        self.status_fifo[3].entry = USBSTAT::new();
+        self.status_fifo[3].is_valid = false;
+    }
+
+    pub fn is_tx(&self, tokenpid: u8) -> bool {
+        match tokenpid {
+            Self::SOF_TOKEN   => { return true; }
+            Self::OUT_TOKEN   => { return true; }
+            Self::SETUP_TOKEN => { return true; }
+            _ => { return false; }
+        }
+    }
+
+    pub fn bdt_address(&self, endpoint: usize) -> u32 {
+        BDTADDRESS::new().with_page3(self.bdtpage3.bdtba())
+                         .with_page2(self.bdtpage2.bdtba())
+                         .with_page1(self.bdtpage1.bdtba())
+                         .with_endpoint(endpoint as u8)
+                         .with_tx(self.is_tx(self.token.tokenpid().into()))
+                         .with_odd(self.bdinfo[endpoint].is_odd.into())
+                         .into()
+    }
+
+    pub fn step_host(&mut self) {
+        if (self.sof_count == self.softhld.cnt().into()) {
+            self.usbistat.set_softok(true);
+        }
+
+        if self.sof_count == 0 && self.usbctl.usbensofen() {
+            self.transmit_sof();
+        }
+
+        self.usbctl.set_txsuspendtokenbusy(self.token_processing);
+
+        if self.token_processing {
+            let sram_addr: usize = (self.bdt_address(self.token.tokenendpt().into()) - self.base_address - Self::SRAM_START) as usize;
+            match self.transfer_state {
+                0 => {
+                    let mut bd: BD = BD::new();
+                    for i in 0..3 {
+                        bd = merge_byte(bd.into(), (sram_addr + i) as u32, self.sram[sram_addr + i]).into();
+                    }
+                    let tokenpid: u8 = self.token.tokenpid().into();
+                    let endpoint: usize = self.token.tokenendpt().into();
+
+                    match tokenpid {
+                        Self::OUT_TOKEN => {
+                            // Handle out token
+                        }
+
+                        Self::SETUP_TOKEN => {
+                            // Handle setup token
+                        }
+
+                        Self::IN_TOKEN => {
+                            // Handle in token
+                        }
+
+                        _ => {
+                            eprintln!("unknown tokenpid: {tokenpid:02x}");
+                            unreachable!();
+                        }
+                    }
+
+                }
+
+                1 => {
+                    // Wait for "transfer" to finish.
+
+                    // Once transfer finishes
+                    // TODO: handle BD modification
+                    self.transfer_state = 0;
+                    self.token_processing = false;
+                }
+
+                _ => {
+                    eprintln!("unreachable USB transfer state!");
+                    unreachable!();
+                }
             }
         }
     }
 
-    pub fn transmit(&self) {
-        println!("USB transmit!");
+    pub fn step_device(&mut self) {
+
     }
 
-    pub fn step(&self) {
-        let sof_threshold: u32 = self.softhldh.cnt() << 8 | self.softhldl.cnt();
-
-        if (self.sof_count <= sof_threshold) && self.usbctl.hostmodeen() {
-            self.wait_for_sof = true;
+    pub fn step(&mut self) {
+        if self.usbctl.hostmodeen() {
+            self.step_host();
+        } else {
+            self.step_device();
         }
 
         if self.sof_count == 0 {
@@ -884,15 +1016,15 @@ impl Usb {
             }
         }
 
-        self.handle_sof();
-
-        if self.byte_time_counter == 0 {
-            self.byte_time_counter = NUM_TICKS_BYTE_TIME;
-            self.sof_count--;
+        if self.sof_count == 0 {
+            self.sof_count = Self::SOF_COUNTER_INITIAL_COUNT;
         }
 
-        self.byte_time_counter--;
+        if self.byte_time_counter == 0 {
+            self.byte_time_counter = Self::NUM_TICKS_BYTE_TIME;
+            self.sof_count -= 1;
+        }
 
-
+        self.byte_time_counter -= 1;
     }
 }

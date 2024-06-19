@@ -323,10 +323,7 @@ pub struct ACCESS {
 #[repr(u32)]
 pub struct BD {
     reserved0: B2,
-    stall: bool,
-    dts: bool,
-    ninc: bool,
-    keep: bool,
+    bdtkpid: B4,
     data01: bool,
     own: bool,
     reserved8: B8,
@@ -340,11 +337,16 @@ pub struct BD {
 #[repr(u32)]
 pub struct BDWrite {
     reserved0: B2,
-    bdtkpid: B4,
+    stall: bool,
+    dts: bool,
+    ninc: bool,
+    keep: bool,
     data01: bool,
     own: bool,
+    reserved8: B8,
+    bc: B10,
     #[skip]
-    __: B24,
+    __: B6,
 }
 
 #[bitfield]
@@ -438,6 +440,7 @@ pub struct Usb {
     transfer_state: u32,
 
     status_fifo: [StatusFifoEntry; Self::STATUS_FIFO_SIZE],
+    bytes_received: u16,
 
 }
 
@@ -501,6 +504,7 @@ impl Usb {
             transfer_timer: 0,
             transfer_state: 0,
             status_fifo: [StatusFifoEntry {entry: USBSTAT::new(), is_valid: false}; Self::STATUS_FIFO_SIZE],
+            bytes_received: 0,
         }
     }
 
@@ -877,21 +881,42 @@ impl Usb {
     }
 
     pub fn get_framenum(&self) -> u32 {
-        return self.frmnuml.frm() as u32 | ((self.frmnumh.frm() as u32) << 8);
+        self.frmnuml.frm() as u32 | ((self.frmnumh.frm() as u32) << 8)
     }
 
-    pub fn transmit_sof(&self) {
+    pub fn increment_framenum(&mut self) {
+        let framenum: u32 = self.get_framenum() + 1;
+
+        self.frmnuml.set_frm((framenum & 0xFF) as u8);
+        self.frmnumh.set_frm(((framenum >> 8) & 7) as u8);
+    }
+
+    pub fn transmit_sof(&mut self) {
         let framenum: u32 = self.get_framenum();
-        let data: [u8;3] = [Self::SOF_TOKEN | (!Self::SOF_TOKEN << 4), (framenum>>3) as u8, ((framenum & 7) << 5) as u8];
+        let data: [u8;3] = [self.pack_tokenpid(Self::SOF_TOKEN), (framenum>>3) as u8, ((framenum & 7) << 5) as u8];
 
         self.start_transmit(&data);
+        self.increment_framenum();
     }
 
-    pub fn start_transmit(&self, data: &[u8]) {
+    pub fn start_transmit(&mut self, data: &[u8]) {
+        // Account for sync and end of frame in the timing
+        self.transfer_timer = data.len() as u32 + 2;
+
+        // wait for the current byte time to finish, if needed
+        if self.byte_time_counter != 0 {
+            self.transfer_timer += 1;
+        }
+
+        // TODO: actually transmit the data somewhere
         for i in 0..data.len() {
             let byte = data[i];
             println!("USB transmit: {byte:02x}");
         }
+    }
+
+    pub fn is_transferring(&self) -> bool {
+        self.transfer_timer != 0
     }
 
     pub fn status_fifo_push(&mut self, status: USBSTAT) {
@@ -920,7 +945,8 @@ impl Usb {
         self.status_fifo[3].is_valid = false;
     }
 
-    pub fn is_tx(&self, tokenpid: u8) -> bool {
+    pub fn is_tx(&self) -> bool {
+        let tokenpid: u8 = self.token.tokenpid().into();
         match tokenpid {
             Self::SOF_TOKEN   => { return true; }
             Self::OUT_TOKEN   => { return true; }
@@ -929,14 +955,51 @@ impl Usb {
         }
     }
 
-    pub fn bdt_address(&self, endpoint: usize) -> u32 {
+    pub fn bdt_address(&self) -> u32 {
+        let endpoint: usize = self.token.tokenendpt().into();
+
         BDTADDRESS::new().with_page3(self.bdtpage3.bdtba())
                          .with_page2(self.bdtpage2.bdtba())
                          .with_page1(self.bdtpage1.bdtba())
                          .with_endpoint(endpoint as u8)
-                         .with_tx(self.is_tx(self.token.tokenpid().into()))
+                         .with_tx(self.is_tx())
                          .with_odd(self.bdinfo[endpoint].is_odd.into())
                          .into()
+    }
+
+    pub fn get_bd(&self) -> BD {
+        let address: usize = (self.bdt_address() - self.base_address - Self::SRAM_START) as usize;
+        let mut bd: BD = BD::new();
+        for i in 0..3 {
+            bd = merge_byte(bd.into(), (address + i) as u32, self.sram[address + i]).into();
+        }
+        bd
+    }
+
+    pub fn set_bd(&mut self, bd: BD) {
+        let address: usize = (self.bdt_address() - self.base_address - Self::SRAM_START) as usize;
+        let bdu32: u32 = bd.into();
+
+        for i in 0..3 {
+            self.sram[address + i] = (bdu32 >> (24 - (i * 4))) as u8;
+        }
+    }
+
+    pub fn get_data_buf_addr(&self) -> usize {
+        let data_addr_addr: usize = ((self.bdt_address() - self.base_address - Self::SRAM_START) + 4) as usize;
+        let mut data_addr: u32 = 0;
+        for i in 0..3 {
+            data_addr = merge_byte(data_addr, (data_addr_addr + i) as u32, self.sram[data_addr_addr + i]);
+        }
+        data_addr as usize
+    }
+
+    pub fn pack_tokenpid(&self, tokenpid: u8) -> u8 {
+        tokenpid | (!tokenpid << 4)
+    }
+
+    pub fn pack_token_packet(&self, tokenpid: u8, addr: u8, endpoint: u8) -> [u8; 3]{
+        [self.pack_tokenpid(tokenpid), addr << 1 | ((endpoint>>3) & 1), ((endpoint & 7) << 5)]
     }
 
     pub fn step_host(&mut self) {
@@ -950,43 +1013,61 @@ impl Usb {
 
         self.usbctl.set_txsuspendtokenbusy(self.token_processing);
 
-        if self.token_processing {
-            let sram_addr: usize = (self.bdt_address(self.token.tokenendpt().into()) - self.base_address - Self::SRAM_START) as usize;
+        if self.token_processing && !self.is_transferring() {
             match self.transfer_state {
+
+                // Transmit token packet
                 0 => {
-                    let mut bd: BD = BD::new();
-                    for i in 0..3 {
-                        bd = merge_byte(bd.into(), (sram_addr + i) as u32, self.sram[sram_addr + i]).into();
-                    }
+                    let bd: BD = self.get_bd();
+                    let addr: u8 = self.usbaddr.addr().into();
                     let tokenpid: u8 = self.token.tokenpid().into();
+                    let endpoint: u8 = self.token.tokenendpt().into();
+
+                    if bd.own() {
+                        let data: [u8;3] = self.pack_token_packet(tokenpid, addr, endpoint);
+                        self.start_transmit(&data);
+
+                        if self.is_tx() {
+                            self.transfer_state = 1;
+                        } else {
+                            self.transfer_state = 2;
+                        }
+                    }
+                }
+
+                // Transmit data packet
+                1 => {
+                    let bd: BD = self.get_bd();
                     let endpoint: usize = self.token.tokenendpt().into();
 
-                    match tokenpid {
-                        Self::OUT_TOKEN => {
-                            // Handle out token
-                        }
 
-                        Self::SETUP_TOKEN => {
-                            // Handle setup token
-                        }
-
-                        Self::IN_TOKEN => {
-                            // Handle in token
-                        }
-
-                        _ => {
-                            eprintln!("unknown tokenpid: {tokenpid:02x}");
-                            unreachable!();
-                        }
-                    }
 
                 }
 
-                1 => {
-                    // Wait for "transfer" to finish.
+                // Receive data packet
+                2 => {
 
-                    // Once transfer finishes
-                    // TODO: handle BD modification
+                }
+
+                // Modify BD and go back to initial state
+                3 => {
+                    let bdwrite: BDWrite = (self.get_bd().into() as u32).into();
+                    let mut bd: BD = self.get_bd();
+
+                    let endpoint: usize = self.token.tokenendpt().into();
+
+                    if !bdwrite.keep() {
+                        bd.set_own(false);
+                        bd.set_bdtkpid(self.token.tokenpid().into());
+                    }
+
+                    if !self.is_tx() {
+                        bd.set_bc(self.bytes_received);
+                    }
+
+                    self.set_bd(bd);
+
+                    self.bdinfo[endpoint].is_odd = !self.bdinfo[endpoint].is_odd;
                     self.transfer_state = 0;
                     self.token_processing = false;
                 }
@@ -995,6 +1076,12 @@ impl Usb {
                     eprintln!("unreachable USB transfer state!");
                     unreachable!();
                 }
+            }
+        }
+
+        if self.is_transferring() {
+            if self.byte_time_counter == 0 {
+                self.transfer_timer -= 1;
             }
         }
     }

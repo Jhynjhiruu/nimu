@@ -915,6 +915,21 @@ impl Usb {
         }
     }
 
+    pub fn start_receive(&mut self, data: &mut [u8]) {
+        // Account for sync and end of frame in the timing
+        self.transfer_timer = data.len() as u32 + 2;
+
+        // wait for the current byte time to finish, if needed
+        if self.byte_time_counter != 0 {
+            self.transfer_timer += 1;
+        }
+
+        // TODO: actually receive the data
+        for i in 0..data.len() {
+            println!("USB receive: XX");
+        }
+    }
+
     pub fn is_transferring(&self) -> bool {
         self.transfer_timer != 0
     }
@@ -985,6 +1000,15 @@ impl Usb {
         }
     }
 
+    pub fn get_bd_write(&self) -> BDWrite {
+        let address: usize = (self.bdt_address() - self.base_address - Self::SRAM_START) as usize;
+        let mut bd: BDWrite = BDWrite::new();
+        for i in 0..3 {
+            bd = merge_byte(bd.into(), (address + i) as u32, self.sram[address + i]).into();
+        }
+        bd
+    }
+
     pub fn get_data_buf_addr(&self) -> usize {
         let data_addr_addr: usize = ((self.bdt_address() - self.base_address - Self::SRAM_START) + 4) as usize;
         let mut data_addr: u32 = 0;
@@ -1002,7 +1026,7 @@ impl Usb {
         [self.pack_tokenpid(tokenpid), addr << 1 | ((endpoint>>3) & 1), ((endpoint & 7) << 5)]
     }
 
-    pub fn step_host(&mut self) {
+    pub fn step_host<const N: usize>(&mut self, ram: &mut [u8; N]) {
         if (self.sof_count == self.softhld.cnt().into()) {
             self.usbistat.set_softok(true);
         }
@@ -1039,19 +1063,29 @@ impl Usb {
                 1 => {
                     let bd: BD = self.get_bd();
                     let endpoint: usize = self.token.tokenendpt().into();
+                    let databuf_addr: usize = self.get_data_buf_addr();
+                    let len: usize = bd.bc().into();
 
+                    self.start_transmit(&ram[databuf_addr..databuf_addr+len]);
 
-
+                    self.transfer_state = 3;
                 }
 
                 // Receive data packet
                 2 => {
+                    let bd: BD = self.get_bd();
+                    let endpoint: usize = self.token.tokenendpt().into();
+                    let databuf_addr: usize = self.get_data_buf_addr();
+                    let len: usize = bd.bc().into();
 
+                    self.start_transmit(&mut ram[databuf_addr..databuf_addr+len]);
+
+                    self.transfer_state = 3;
                 }
 
                 // Modify BD and go back to initial state
                 3 => {
-                    let bdwrite: BDWrite = (self.get_bd().into() as u32).into();
+                    let bdwrite: BDWrite = self.get_bd_write();
                     let mut bd: BD = self.get_bd();
 
                     let endpoint: usize = self.token.tokenendpt().into();
@@ -1090,9 +1124,9 @@ impl Usb {
 
     }
 
-    pub fn step(&mut self) {
+    pub fn step<const N: usize>(&mut self, ram: &mut [byte; N]) {
         if self.usbctl.hostmodeen() {
-            self.step_host();
+            self.step_host(ram);
         } else {
             self.step_device();
         }

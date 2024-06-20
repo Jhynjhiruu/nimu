@@ -463,8 +463,8 @@ impl Cop0 {
         self.si.step();
         self.sp.step();
         self.vi.step();
-        self.usb0.step();
-        self.usb1.step();
+        self.usb0.step(&mut self.ram);
+        self.usb1.step(&mut self.ram);
 
         self.mi.set_vi_intr(self.vi.has_interrupt());
         self.mi.set_pi_intr(self.pi.has_dma_done_interrupt());

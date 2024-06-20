@@ -678,37 +678,38 @@ impl Usb {
             }
 
             0x0080..=0x0083 => {
-                let usbistatWrite: USBISTAT = merge_byte(0, address, val).into();
+                let usbistat_write: USBISTAT = merge_byte(0, address, val).into();
 
-                if usbistatWrite.reset() {
+                if usbistat_write.reset() {
                     self.usbistat.set_reset(false);
                 }
 
-                if usbistatWrite.error() {
+                if usbistat_write.error() {
                     self.usbistat.set_error(false);
                 }
 
-                if usbistatWrite.softok() {
+                if usbistat_write.softok() {
                     self.usbistat.set_softok(false);
                 }
 
-                if usbistatWrite.tokdne() {
-                    self.usbistat.set_tokdne(false);
+                if usbistat_write.tokdne() {
+                    self.status_fifo_pop();
+                    self.usbistat.set_tokdne(self.status_fifo[0].is_valid && self.usbinten.tokdneen());                    
                 }
 
-                if usbistatWrite.sleep() {
+                if usbistat_write.sleep() {
                     self.usbistat.set_sleep(false);
                 }
 
-                if usbistatWrite.resume() {
+                if usbistat_write.resume() {
                     self.usbistat.set_resume(false);
                 }
 
-                if usbistatWrite.attach() {
+                if usbistat_write.attach() {
                     self.usbistat.set_attach(false);
                 }
 
-                if usbistatWrite.stall() {
+                if usbistat_write.stall() {
                     self.usbistat.set_stall(false);
                 }
             }
@@ -901,12 +902,7 @@ impl Usb {
 
     pub fn start_transmit(&mut self, data: &[u8]) {
         // Account for sync and end of frame in the timing
-        self.transfer_timer = data.len() as u32 + 2;
-
-        // wait for the current byte time to finish, if needed
-        if self.byte_time_counter != 0 {
-            self.transfer_timer += 1;
-        }
+        self.transfer_timer = data.len() as u32 + 2 + 1;
 
         // TODO: actually transmit the data somewhere
         for i in 0..data.len() {
@@ -916,13 +912,8 @@ impl Usb {
     }
 
     pub fn start_receive(&mut self, data: &mut [u8]) {
-        // Account for sync and end of frame in the timing
-        self.transfer_timer = data.len() as u32 + 2;
-
-        // wait for the current byte time to finish, if needed
-        if self.byte_time_counter != 0 {
-            self.transfer_timer += 1;
-        }
+        // Account for sync and end of frame in the timing, plus previous byte time
+        self.transfer_timer = data.len() as u32 + 2 + 1;
 
         // TODO: actually receive the data
         for i in 0..data.len() {
@@ -1009,7 +1000,7 @@ impl Usb {
         bd
     }
 
-    pub fn get_data_buf_addr(&self) -> usize {
+    pub fn get_databuf_addr(&self) -> usize {
         let data_addr_addr: usize = ((self.bdt_address() - self.base_address - Self::SRAM_START) + 4) as usize;
         let mut data_addr: u32 = 0;
         for i in 0..3 {
@@ -1063,7 +1054,7 @@ impl Usb {
                 1 => {
                     let bd: BD = self.get_bd();
                     let endpoint: usize = self.token.tokenendpt().into();
-                    let databuf_addr: usize = self.get_data_buf_addr();
+                    let databuf_addr: usize = self.get_databuf_addr();
                     let len: usize = bd.bc().into();
 
                     self.start_transmit(&ram[databuf_addr..databuf_addr+len]);
@@ -1075,7 +1066,7 @@ impl Usb {
                 2 => {
                     let bd: BD = self.get_bd();
                     let endpoint: usize = self.token.tokenendpt().into();
-                    let databuf_addr: usize = self.get_data_buf_addr();
+                    let databuf_addr: usize = self.get_databuf_addr();
                     let len: usize = bd.bc().into();
 
                     self.start_transmit(&mut ram[databuf_addr..databuf_addr+len]);
@@ -1083,12 +1074,17 @@ impl Usb {
                     self.transfer_state = 3;
                 }
 
-                // Modify BD and go back to initial state
+                // Modify BD, push to status fifo, assert interrupts and return to initial state
                 3 => {
                     let bdwrite: BDWrite = self.get_bd_write();
                     let mut bd: BD = self.get_bd();
 
                     let endpoint: usize = self.token.tokenendpt().into();
+                    let mut status: USBSTAT = USBSTAT::new();
+
+                    status.set_endp(endpoint as u8);
+                    status.set_odd(self.bdinfo[endpoint].is_odd);
+                    status.set_tx(self.is_tx());
 
                     if !bdwrite.keep() {
                         bd.set_own(false);
@@ -1104,6 +1100,8 @@ impl Usb {
                     self.bdinfo[endpoint].is_odd = !self.bdinfo[endpoint].is_odd;
                     self.transfer_state = 0;
                     self.token_processing = false;
+                    self.status_fifo_push(status);
+                    self.usbistat.set_tokdne(self.usbinten.tokdneen());
                 }
 
                 _ => {

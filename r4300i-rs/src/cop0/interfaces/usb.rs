@@ -395,6 +395,14 @@ pub struct StatusFifoEntry {
 }
 
 #[derive(Debug)]
+enum UsbHostTransferState {
+    Start,
+    Transmit,
+    Receive,
+    Finish,
+}
+
+#[derive(Debug)]
 pub struct Usb {
     base_address: word,
 
@@ -437,7 +445,7 @@ pub struct Usb {
     bdinfo: [BDINFO; Self::NUM_ENDPTS],
 
     transfer_timer: u32,
-    transfer_state: u32,
+    transfer_state: UsbHostTransferState,
 
     status_fifo: [StatusFifoEntry; Self::STATUS_FIFO_SIZE],
     bytes_received: u16,
@@ -502,7 +510,7 @@ impl Usb {
             transaction_state: 0,
             bdinfo: [BDINFO {is_odd: false, token: 0}; Self::NUM_ENDPTS],
             transfer_timer: 0,
-            transfer_state: 0,
+            transfer_state: UsbHostTransferState::Start,
             status_fifo: [StatusFifoEntry {entry: USBSTAT::new(), is_valid: false}; Self::STATUS_FIFO_SIZE],
             bytes_received: 0,
         }
@@ -984,10 +992,9 @@ impl Usb {
 
     pub fn set_bd(&mut self, bd: BD) {
         let address: usize = (self.bdt_address() - self.base_address - Self::SRAM_START) as usize;
-        let bdu32: u32 = bd.into();
 
         for i in 0..3 {
-            self.sram[address + i] = (bdu32 >> (24 - (i * 4))) as u8;
+            self.sram[address + i] = retrieve_byte(bd.into(), (address + i) as u32);
         }
     }
 
@@ -1007,6 +1014,14 @@ impl Usb {
             data_addr = merge_byte(data_addr, (data_addr_addr + i) as u32, self.sram[data_addr_addr + i]);
         }
         data_addr as usize
+    }
+
+    pub fn set_databuf_addr(&mut self, data_addr: u32) {
+        let data_addr_addr: usize = ((self.bdt_address() - self.base_address - Self::SRAM_START) + 4) as usize;
+
+        for i in 0..3 {
+            self.sram[data_addr_addr + i] = retrieve_byte(data_addr, (data_addr_addr + i) as u32);
+        }
     }
 
     pub fn pack_tokenpid(&self, tokenpid: u8) -> u8 {
@@ -1031,8 +1046,7 @@ impl Usb {
         if self.token_processing && !self.is_transferring() {
             match self.transfer_state {
 
-                // Transmit token packet
-                0 => {
+                UsbHostTransferState::Start => {
                     let bd: BD = self.get_bd();
                     let addr: u8 = self.usbaddr.addr().into();
                     let tokenpid: u8 = self.token.tokenpid().into();
@@ -1043,15 +1057,14 @@ impl Usb {
                         self.start_transmit(&data);
 
                         if self.is_tx() {
-                            self.transfer_state = 1;
+                            self.transfer_state = UsbHostTransferState::Transmit;
                         } else {
-                            self.transfer_state = 2;
+                            self.transfer_state = UsbHostTransferState::Receive;
                         }
                     }
                 }
 
-                // Transmit data packet
-                1 => {
+                UsbHostTransferState::Transmit => {
                     let bd: BD = self.get_bd();
                     let endpoint: usize = self.token.tokenendpt().into();
                     let databuf_addr: usize = self.get_databuf_addr();
@@ -1059,11 +1072,10 @@ impl Usb {
 
                     self.start_transmit(&ram[databuf_addr..databuf_addr+len]);
 
-                    self.transfer_state = 3;
+                    self.transfer_state = UsbHostTransferState::Finish;
                 }
 
-                // Receive data packet
-                2 => {
+                UsbHostTransferState::Receive => {
                     let bd: BD = self.get_bd();
                     let endpoint: usize = self.token.tokenendpt().into();
                     let databuf_addr: usize = self.get_databuf_addr();
@@ -1071,11 +1083,11 @@ impl Usb {
 
                     self.start_transmit(&mut ram[databuf_addr..databuf_addr+len]);
 
-                    self.transfer_state = 3;
+                    self.transfer_state = UsbHostTransferState::Finish;
                 }
 
                 // Modify BD, push to status fifo, assert interrupts and return to initial state
-                3 => {
+                UsbHostTransferState::Finish => {
                     let bdwrite: BDWrite = self.get_bd_write();
                     let mut bd: BD = self.get_bd();
 
@@ -1085,6 +1097,7 @@ impl Usb {
                     status.set_endp(endpoint as u8);
                     status.set_odd(self.bdinfo[endpoint].is_odd);
                     status.set_tx(self.is_tx());
+                    self.status_fifo_push(status);
 
                     if !bdwrite.keep() {
                         bd.set_own(false);
@@ -1095,13 +1108,17 @@ impl Usb {
                         bd.set_bc(self.bytes_received);
                     }
 
+                    if !bdwrite.ninc() {
+                        let databuf_addr: u32 = (self.get_databuf_addr() as u32) + (bd.bc() as u32);
+                        self.set_databuf_addr(databuf_addr);
+                    }
+
                     self.set_bd(bd);
 
                     self.bdinfo[endpoint].is_odd = !self.bdinfo[endpoint].is_odd;
-                    self.transfer_state = 0;
-                    self.token_processing = false;
-                    self.status_fifo_push(status);
                     self.usbistat.set_tokdne(self.usbinten.tokdneen());
+                    self.token_processing = false;
+                    self.transfer_state = UsbHostTransferState::Start;
                 }
 
                 _ => {

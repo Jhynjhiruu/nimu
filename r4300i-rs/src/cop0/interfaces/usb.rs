@@ -1,4 +1,5 @@
 use std::io;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 use crate::types::*;
@@ -917,17 +918,17 @@ impl Usb {
     }
 
     pub fn start_transmit(&mut self, data: &[u8]) {
-        // Account for sync and end of frame in the timing
+        // Account for sync and end of frame in the timing, plus previous byte time
         self.transfer_timer = data.len() as u32 + 2 + 1;
 
-        stream.write(data);
+        self.stream.as_mut().unwrap().write(data);
     }
 
     pub fn start_receive(&mut self, data: &mut [u8]) {
         // Account for sync and end of frame in the timing, plus previous byte time
         self.transfer_timer = data.len() as u32 + 2 + 1;
 
-        stream.read(data);
+        self.stream.as_mut().unwrap().read(data);
     }
 
     pub fn is_transferring(&self) -> bool {
@@ -1145,20 +1146,22 @@ impl Usb {
     }
 
     pub fn attempt_connection(&mut self) {
-        if !self.check_connected() {
-            self.listener.set_nonblocking(true);
+        if self.check_connected() {
+            return;
+        }
 
-            for stream in self.listener.incoming() {
-                match stream {
-                    Ok(s) => {
-                        println!("Connected!");
-                        self.stream = Some(s);
-                    }
+        self.listener.set_nonblocking(true);
 
-                    _ => {
-                        // Try again next step
-                        return;
-                    }
+        for stream in self.listener.incoming() {
+            match stream {
+                Ok(s) => {
+                    println!("Connected!");
+                    self.stream = Some(s);
+                }
+
+                _ => {
+                    // Try again next step
+                    return;
                 }
             }
         }

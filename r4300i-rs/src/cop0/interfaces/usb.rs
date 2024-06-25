@@ -1,3 +1,6 @@
+use std::io;
+use std::net::{TcpListener, TcpStream};
+
 use crate::types::*;
 
 use modular_bitfield::prelude::*;
@@ -450,6 +453,8 @@ pub struct Usb {
     status_fifo: [StatusFifoEntry; Self::STATUS_FIFO_SIZE],
     bytes_received: u16,
 
+    listener: TcpListener,
+    stream: Option<TcpStream>,
 }
 
 impl Usb {
@@ -471,7 +476,7 @@ impl Usb {
 
     const STATUS_FIFO_SIZE: usize = 4;
 
-    pub fn new(base_address: word) -> Self {
+    pub fn new(base_address: word, port: u16) -> Self {
         Self {
             base_address,
             clock_sel: ClockSel::new(),
@@ -513,6 +518,9 @@ impl Usb {
             transfer_state: UsbHostTransferState::Start,
             status_fifo: [StatusFifoEntry {entry: USBSTAT::new(), is_valid: false}; Self::STATUS_FIFO_SIZE],
             bytes_received: 0,
+
+            listener: TcpListener::bind(format!("127.0.0.1:{port}")).unwrap(),
+            stream: None,
         }
     }
 
@@ -912,21 +920,14 @@ impl Usb {
         // Account for sync and end of frame in the timing
         self.transfer_timer = data.len() as u32 + 2 + 1;
 
-        // TODO: actually transmit the data somewhere
-        for i in 0..data.len() {
-            let byte = data[i];
-            println!("USB transmit: {byte:02x}");
-        }
+        stream.write(data);
     }
 
     pub fn start_receive(&mut self, data: &mut [u8]) {
         // Account for sync and end of frame in the timing, plus previous byte time
         self.transfer_timer = data.len() as u32 + 2 + 1;
 
-        // TODO: actually receive the data
-        for i in 0..data.len() {
-            println!("USB receive: XX");
-        }
+        stream.read(data);
     }
 
     pub fn is_transferring(&self) -> bool {
@@ -1081,7 +1082,7 @@ impl Usb {
                     let databuf_addr: usize = self.get_databuf_addr();
                     let len: usize = bd.bc().into();
 
-                    self.start_transmit(&mut ram[databuf_addr..databuf_addr+len]);
+                    self.start_receive(&mut ram[databuf_addr..databuf_addr+len]);
 
                     self.transfer_state = UsbHostTransferState::Finish;
                 }
@@ -1139,7 +1140,38 @@ impl Usb {
 
     }
 
+    pub fn check_connected(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    pub fn attempt_connection(&mut self) {
+        if !self.check_connected() {
+            self.listener.set_nonblocking(true);
+
+            for stream in self.listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        println!("Connected!");
+                        self.stream = Some(s);
+                    }
+
+                    _ => {
+                        // Try again next step
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn step<const N: usize>(&mut self, ram: &mut [byte; N]) {
+
+        self.attempt_connection();
+
+        if !self.check_connected() {
+            return;
+        }
+
         if self.usbctl.hostmodeen() {
             self.step_host(ram);
         } else {

@@ -348,8 +348,8 @@ impl Cop0 {
             ai: Ai::new(),
             pi: Pi::new(nand, spare),
             si: Si::new(),
-            usb0: Usb::new(0x04900000),
-            usb1: Usb::new(0x04A00000),
+            usb0: Usb::new(0x04900000, 0xBB3D),
+            usb1: Usb::new(0x04A00000, 0xBBDB),
         }
     }
 
